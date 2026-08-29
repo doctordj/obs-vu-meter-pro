@@ -1,0 +1,52 @@
+name: Build OBS VU Meter PRO - Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path package\obs-plugins\64bit
+          New-Item -ItemType Directory -Force -Path package\data\obs-plugins\obs-vu-meter-pro
+
+          Copy-Item build\Release\obs-vu-meter-pro.dll `
+            package\obs-plugins\64bit\
+
+          if (Test-Path "data") {
+            Copy-Item data\* `
+              package\data\obs-plugins\obs-vu-meter-pro\ `
+              -Recurse -Force
+          }
+
+          Compress-Archive `
+            -Path package\* `
+            -DestinationPath OBS-VU-Meter-PRO-Windows-x64.zip `
+            -Force
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: OBS-VU-Meter-PRO-Windows-x64
+          path: OBS-VU-Meter-PRO-Windows-x64.zip
