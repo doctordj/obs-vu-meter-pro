@@ -6,46 +6,146 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Windows x64 Release
     runs-on: windows-2022
 
+    env:
+      CI: true
+
     steps:
-      - name: Checkout
+
+      - name: Checkout VU Meter
         uses: actions/checkout@v4
 
-      - name: Setup CMake
-        uses: lukka/get-cmake@latest
-
-      - name: Configure
+      - name: Clone official OBS plugin template
+        shell: pwsh
         run: |
-          cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+          git clone --depth 1 https://github.com/obsproject/obs-plugintemplate.git template
 
-      - name: Build
+      - name: Copy VU Meter source into official template
+        shell: pwsh
         run: |
-          cmake --build build --config Release --parallel
+          Remove-Item template/src/* -Force -Recurse
 
-      - name: Package
-        shell: powershell
+          Copy-Item src/* template/src/ -Force -Recurse
+
+          if (Test-Path data) {
+            Remove-Item template/data/* -Force -Recurse -ErrorAction SilentlyContinue
+            Copy-Item data/* template/data/ -Force -Recurse
+          }
+
+      - name: Configure plugin metadata
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path package\obs-plugins\64bit
-          New-Item -ItemType Directory -Force -Path package\data\obs-plugins\obs-vu-meter-pro
+          $buildspec = @'
+          {
+            "dependencies": {
+              "obs-studio": {
+                "version": "31.1.1",
+                "baseUrl": "https://github.com/obsproject/obs-studio/archive/refs/tags",
+                "hashes": {
+                  "windows-x64": "2c8427c10b55ac6d68008df2e9a3e82f4647aaad18f105e30d4713c2de678ccf"
+                }
+              },
+              "prebuilt": {
+                "version": "2025-07-11",
+                "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
+                "hashes": {
+                  "windows-x64": "c8c642c1070dc31ce9a0f1e4cef5bb992f4bff4882255788b5da12129e85caa7"
+                }
+              },
+              "qt6": {
+                "version": "2025-07-11",
+                "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
+                "hashes": {
+                  "windows-x64": "0e76bf0555dd5382838850b748d3dcfab44a1e1058441309ab54e1a65b156d0a"
+                }
+              }
+            },
+            "platformConfig": {},
+            "name": "obs-vu-meter-pro",
+            "displayName": "VU Meter PRO",
+            "version": "1.0.0",
+            "author": "Doctor DJ",
+            "website": "https://github.com/doctordj/obs-vu-meter-pro",
+            "email": ""
+          }
+          '@
 
-          Copy-Item build\Release\obs-vu-meter-pro.dll `
-            package\obs-plugins\64bit\
+          Set-Content template/buildspec.json $buildspec
 
-          if (Test-Path "data") {
-            Copy-Item data\* `
-              package\data\obs-plugins\obs-vu-meter-pro\ `
-              -Recurse -Force
+      - name: Configure CMakeLists
+        shell: pwsh
+        run: |
+          $cmake = @'
+          cmake_minimum_required(VERSION 3.28...3.30)
+
+          include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
+
+          project(${_name} VERSION ${_version})
+
+          option(ENABLE_FRONTEND_API "Use obs-frontend-api" OFF)
+          option(ENABLE_QT "Use Qt" OFF)
+
+          include(compilerconfig)
+          include(defaults)
+          include(helpers)
+
+          add_library(${CMAKE_PROJECT_NAME} MODULE)
+
+          find_package(libobs REQUIRED)
+
+          target_link_libraries(
+            ${CMAKE_PROJECT_NAME}
+            PRIVATE
+            OBS::libobs
+          )
+
+          target_sources(
+            ${CMAKE_PROJECT_NAME}
+            PRIVATE
+            src/plugin-main.cpp
+            src/vu-meter-source.cpp
+          )
+
+          set_target_properties_plugin(
+            ${CMAKE_PROJECT_NAME}
+            PROPERTIES
+            OUTPUT_NAME ${_name}
+          )
+          '@
+
+          Set-Content template/CMakeLists.txt $cmake
+
+      - name: Build using official OBS template
+        shell: pwsh
+        working-directory: template
+        run: |
+          .\.github\scripts\Build-Windows.ps1 `
+            -Target x64 `
+            -Configuration Release
+
+      - name: Package plugin
+        shell: pwsh
+        run: |
+          $release = "template/release/Release"
+
+          if (!(Test-Path $release)) {
+            Write-Error "Release directory was not generated."
+            exit 1
           }
 
           Compress-Archive `
-            -Path package\* `
-            -DestinationPath OBS-VU-Meter-PRO-Windows-x64.zip `
+            -Path "$release/*" `
+            -DestinationPath "OBS-VU-Meter-PRO-Windows-x64.zip" `
             -Force
 
-      - name: Upload plugin
+      - name: Upload Windows plugin
         uses: actions/upload-artifact@v4
         with:
           name: OBS-VU-Meter-PRO-Windows-x64
