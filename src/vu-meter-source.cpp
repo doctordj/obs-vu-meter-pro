@@ -247,6 +247,7 @@ static void *vu_create(obs_data_t *settings, obs_source_t *source)
     m->source = source;
 
     m->volmeter = obs_volmeter_create(OBS_FADER_LOG);
+
     if (m->volmeter)
         obs_volmeter_add_callback(m->volmeter, meter_callback, m);
 
