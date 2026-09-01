@@ -225,6 +225,8 @@ static void vu_render(void *data, gs_effect_t *)
 
 static void vu_tick(void *data, float seconds)
 {
+    (void)settings;
+    
     auto *m = static_cast<vu_meter *>(data);
     if (!m)
         return;
@@ -391,15 +393,20 @@ struct obs_source_info vu_meter_source_info = {
     .id = "obs_vu_meter_pro",
     .type = OBS_SOURCE_TYPE_INPUT,
     .output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
+
     .get_name = vu_name,
     .create = vu_create,
     .destroy = vu_destroy,
-    .update = vu_update,
-    .get_defaults = vu_defaults,
-    .get_properties = vu_properties,
-    .video_render = vu_render,
-    .video_tick = vu_tick,
+
     .get_width = vu_width,
     .get_height = vu_height,
+
+    .get_defaults = vu_defaults,
+    .get_properties = vu_properties,
+    .update = vu_update,
+
+    .video_tick = vu_tick,
+    .video_render = vu_render,
+
     .icon_type = OBS_ICON_TYPE_CUSTOM,
 };
