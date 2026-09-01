@@ -136,17 +136,18 @@ static void render_rect(gs_effect_t *effect, gs_eparam_t *color_param,
     if (!effect || !color_param || w <= 0.0f || h <= 0.0f)
         return;
 
+    /*
+     * OBS's OBS_EFFECT_SOLID is the same solid-color technique used by
+     * OBS itself for simple rectangles.  Keep the draw operation isolated
+     * so every rectangle gets its own color and transform.
+     */
     gs_effect_set_color(color_param, color);
 
     gs_matrix_push();
     gs_matrix_translate3f(x, y, 0.0f);
 
-    /* Use the same Solid-effect loop used by OBS itself for color rectangles. */
-    while (gs_effect_loop(effect, "Solid")) {
-        gs_draw_sprite(nullptr, 0,
-                       (uint32_t)std::max(1.0f, std::round(w)),
-                       (uint32_t)std::max(1.0f, std::round(h)));
-    }
+    while (gs_effect_loop(effect, "Solid"))
+        gs_draw_quadf(nullptr, 0, w, h);
 
     gs_matrix_pop();
 }
@@ -163,13 +164,21 @@ static void render_bar(vu_meter *m, gs_effect_t *effect, gs_eparam_t *color_para
     for (int i = 0; i < m->segments; ++i) {
         const float start = (float)i / (float)m->segments;
         const float end = (float)(i + 1) / (float)m->segments;
+
         const float pos0 = (m->direction == 0) ? x + start * w : y + start * h;
         const float pos1 = (m->direction == 0) ? x + end * w : y + end * h;
+
         const float size = std::max(1.0f, pos1 - pos0 - (float)m->gap);
-        const bool on = ((float)i + 1.0f) / (float)m->segments <= frac + 0.0001f;
-        const float segment_db = m->min_db +
+
+        const bool on =
+            ((float)i + 1.0f) / (float)m->segments <= frac + 0.0001f;
+
+        const float segment_db =
+            m->min_db +
             ((float)i + 0.5f) / (float)m->segments * (-m->min_db);
-        const uint32_t color = on ? segment_color(m, segment_db) : m->color_off;
+
+        const uint32_t color =
+            on ? segment_color(m, segment_db) : m->color_off;
 
         if (m->direction == 0)
             render_rect(effect, color_param, color, pos0, y, size, h);
@@ -188,6 +197,7 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
 
     const uint32_t cx = obs_source_get_width(m->source);
     const uint32_t cy = obs_source_get_height(m->source);
+
     if (!cx || !cy)
         return;
 
@@ -195,8 +205,6 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
     float peak[2];
     float hold[2];
     int direction;
-    int segments;
-    int gap;
     bool show_hold;
     uint32_t color_background;
     uint32_t color_peak;
@@ -204,15 +212,15 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
 
     {
         std::lock_guard<std::mutex> lock(m->level_mutex);
+
         magnitude[0] = m->magnitude[0];
         magnitude[1] = m->magnitude[1];
         peak[0] = m->peak[0];
         peak[1] = m->peak[1];
         hold[0] = m->hold[0];
         hold[1] = m->hold[1];
+
         direction = m->direction;
-        segments = m->segments;
-        gap = m->gap;
         show_hold = m->show_hold;
         color_background = m->color_background;
         color_peak = m->color_peak;
@@ -221,66 +229,126 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
 
     (void)effect_unused;
     (void)peak;
-    (void)segments;
-    (void)gap;
 
-    /* Diagnostic: prove that the render thread sees the changing audio level. */
+    /*
+     * IMPORTANT:
+     * A custom-draw source is rendered inside the graphics state prepared
+     * by OBS.  Do not assume that the projection, model matrix or viewport
+     * already correspond to this source's own dimensions.
+     *
+     * Version 2.1 explicitly establishes a source-local 2D rendering space.
+     * This avoids the situation where the render callback is receiving and
+     * calculating audio correctly, but the rectangles are transformed
+     * outside the source texture.
+     */
+    gs_viewport_push();
+    gs_projection_push();
+    gs_matrix_push();
+    gs_matrix_identity();
+
+    gs_set_viewport(0, 0, (int)cx, (int)cy);
+    gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+
+    /*
+     * Make the custom source independent of the blend state inherited from
+     * whatever source was rendered before it.
+     */
+    gs_blend_state_push();
+    gs_enable_blending(true);
+    gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+
+    gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
+    if (!effect) {
+        gs_blend_state_pop();
+        gs_matrix_pop();
+        gs_projection_pop();
+        gs_viewport_pop();
+        return;
+    }
+
+    gs_eparam_t *color_param =
+        gs_effect_get_param_by_name(effect, "color");
+
+    if (!color_param) {
+        gs_blend_state_pop();
+        gs_matrix_pop();
+        gs_projection_pop();
+        gs_viewport_pop();
+        return;
+    }
+
+    /*
+     * Diagnostic: prove that the render thread sees the same changing
+     * levels received by the audio callback.
+     */
     static float debug_elapsed = 0.0f;
     debug_elapsed += 1.0f / 60.0f;
+
     if (debug_elapsed >= 1.0f) {
         debug_elapsed = 0.0f;
+
         blog(LOG_INFO,
-             "[OBS VU Meter PRO] render L=%.1f dB (%.3f) R=%.1f dB (%.3f)",
+             "[OBS VU Meter PRO 2.1] render L=%.1f dB (%.3f) "
+             "R=%.1f dB (%.3f)",
              magnitude[0], level_to_fraction(magnitude[0], min_db),
              magnitude[1], level_to_fraction(magnitude[1], min_db));
     }
 
-    gs_set_2d_mode();
+    const float outer = 6.0f;
 
-    gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
-    if (!effect)
-        return;
-
-    gs_eparam_t *color_param = gs_effect_get_param_by_name(effect, "color");
-    if (!color_param)
-        return;
-
-    /* Background */
+    /* Draw the source background first. */
     render_rect(effect, color_param, color_background,
                 0.0f, 0.0f, (float)cx, (float)cy);
 
-    const float outer = 6.0f;
-
     if (direction == 0) {
-        const float bar_h = std::max(1.0f, ((float)cy - outer * 3.0f) / 2.0f);
-        const float bar_w = std::max(1.0f, (float)cx - outer * 2.0f);
+        const float bar_h =
+            std::max(1.0f, ((float)cy - outer * 3.0f) / 2.0f);
+        const float bar_w =
+            std::max(1.0f, (float)cx - outer * 2.0f);
 
-        /* The moving VU uses MAGNITUDE. Peak/hold are separate indicators. */
         render_bar(m, effect, color_param,
                    outer, outer, bar_w, bar_h, magnitude[0]);
+
         render_bar(m, effect, color_param,
-                   outer, outer * 2.0f + bar_h, bar_w, bar_h, magnitude[1]);
+                   outer, outer * 2.0f + bar_h,
+                   bar_w, bar_h, magnitude[1]);
 
         if (show_hold) {
-            const float hold_w1 = bar_w * level_to_fraction(hold[0], min_db);
-            const float hold_w2 = bar_w * level_to_fraction(hold[1], min_db);
+            const float hold_w1 =
+                bar_w * level_to_fraction(hold[0], min_db);
+            const float hold_w2 =
+                bar_w * level_to_fraction(hold[1], min_db);
+
             const float hold_y1 = outer + bar_h - 2.0f;
-            const float hold_y2 = outer * 2.0f + bar_h + bar_h - 2.0f;
+            const float hold_y2 =
+                outer * 2.0f + bar_h + bar_h - 2.0f;
 
             render_rect(effect, color_param, color_peak,
-                        outer + std::max(0.0f, hold_w1 - 1.0f), hold_y1, 2.0f, 2.0f);
+                        outer + std::max(0.0f, hold_w1 - 1.0f),
+                        hold_y1, 2.0f, 2.0f);
+
             render_rect(effect, color_param, color_peak,
-                        outer + std::max(0.0f, hold_w2 - 1.0f), hold_y2, 2.0f, 2.0f);
+                        outer + std::max(0.0f, hold_w2 - 1.0f),
+                        hold_y2, 2.0f, 2.0f);
         }
     } else {
-        const float bar_w = std::max(1.0f, ((float)cx - outer * 3.0f) / 2.0f);
-        const float bar_h = std::max(1.0f, (float)cy - outer * 2.0f);
+        const float bar_w =
+            std::max(1.0f, ((float)cx - outer * 3.0f) / 2.0f);
+        const float bar_h =
+            std::max(1.0f, (float)cy - outer * 2.0f);
 
         render_bar(m, effect, color_param,
                    outer, outer, bar_w, bar_h, magnitude[0]);
+
         render_bar(m, effect, color_param,
-                   outer * 2.0f + bar_w, outer, bar_w, bar_h, magnitude[1]);
+                   outer * 2.0f + bar_w, outer,
+                   bar_w, bar_h, magnitude[1]);
     }
+
+    gs_blend_state_pop();
+    gs_matrix_pop();
+    gs_projection_pop();
+    gs_viewport_pop();
 }
 
 static void vu_tick(void *data, float seconds)
