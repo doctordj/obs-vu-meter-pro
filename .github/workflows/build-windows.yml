@@ -55,11 +55,10 @@ jobs:
 
           $spec | ConvertTo-Json -Depth 20 | Set-Content $file
 
-      - name: Use official CMakeLists
+      - name: Copy plugin CMakeLists
         shell: pwsh
         run: |
-          # The official OBS template CMakeLists.txt is intentionally retained.
-          # Only the plugin source files are replaced.
+          Copy-Item CMakeLists.txt template/CMakeLists.txt -Force
 
       - name: Build plugin
         shell: pwsh
