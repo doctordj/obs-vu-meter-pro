@@ -225,7 +225,6 @@ static void vu_render(void *data, gs_effect_t *)
 
 static void vu_tick(void *data, float seconds)
 {
-    (void)settings;
     
     auto *m = static_cast<vu_meter *>(data);
     if (!m)
@@ -243,6 +242,8 @@ static void vu_tick(void *data, float seconds)
 
 static void *vu_create(obs_data_t *settings, obs_source_t *source)
 {
+    (void)settings;
+
     auto *m = new vu_meter();
     m->source = source;
 
