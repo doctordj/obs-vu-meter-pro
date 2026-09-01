@@ -72,11 +72,6 @@ static float level_to_fraction(float db, float min_db)
     return std::clamp((db - min_db) / (0.0f - min_db), 0.0f, 1.0f);
 }
 
-static uint32_t argb(uint32_t rgb)
-{
-    return rgb;
-}
-
 static uint32_t segment_color(const vu_meter *m, float segment_db)
 {
     if (segment_db >= m->error_db)
