@@ -12,11 +12,15 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
     obs_register_source(&vu_meter_source_info);
-    blog(LOG_INFO, "[OBS VU Meter PRO] loaded - v2.1 direct audio capture");
+
+    blog(LOG_INFO,
+         "[OBS VU Meter PRO] loaded - v2.2 obs_volmeter");
+
     return true;
 }
 
 void obs_module_unload(void)
 {
-    blog(LOG_INFO, "[OBS VU Meter PRO] unloaded");
+    blog(LOG_INFO,
+         "[OBS VU Meter PRO] unloaded");
 }
