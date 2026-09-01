@@ -48,6 +48,7 @@ struct vu_meter {
     uint32_t color_off = 0xFF20252B;
     uint32_t color_background = 0xB0101419;
     uint32_t color_peak = 0xFFFFFFFF;
+    uint32_t color_hold = 0xFF00FFFF;
 
     float hold_age[2] = {0.0f, 0.0f};
     float last_tick = 0.0f;
@@ -71,6 +72,41 @@ static float level_to_fraction(float db, float min_db)
         return 0.0f;
     return std::clamp((db - min_db) / (0.0f - min_db), 0.0f, 1.0f);
 }
+
+/*
+ * OBS color properties are stored as RGBA (R in the least-significant
+ * byte), while gs_effect_set_color() expects ARGB.
+ *
+ * Keeping this conversion at the settings boundary makes custom colors
+ * selected in the OBS color picker render exactly as selected.
+ */
+static uint32_t color_property_to_argb(long long rgba_value)
+{
+    const uint32_t rgba = (uint32_t)rgba_value;
+    const uint32_t r = rgba & 0xFFu;
+    const uint32_t g = (rgba >> 8) & 0xFFu;
+    const uint32_t b = (rgba >> 16) & 0xFFu;
+    const uint32_t a = (rgba >> 24) & 0xFFu;
+
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+static uint32_t color_property_to_argb_migrated(long long value,
+                                                     uint32_t legacy_argb)
+{
+    const uint32_t raw = (uint32_t)value;
+
+    /*
+     * Versions 2.1/2.1.1 stored their built-in defaults in ARGB even though
+     * OBS color properties are RGBA. Preserve those existing default values
+     * when an old source is upgraded; user-selected colors are converted.
+     */
+    if (raw == legacy_argb)
+        return raw;
+
+    return color_property_to_argb(value);
+}
+
 
 static uint32_t segment_color(const vu_meter *m, float segment_db)
 {
@@ -159,7 +195,9 @@ static void render_bar(vu_meter *m, gs_effect_t *effect, gs_eparam_t *color_para
         return;
 
     const float frac = level_to_fraction(db, m->min_db);
-    const float segment_width = w / (float)m->segments;
+    const float segment_span =
+        (m->direction == 0 ? w : h) / (float)m->segments;
+    const float gap = std::min((float)m->gap, std::max(0.0f, segment_span - 1.0f));
 
     for (int i = 0; i < m->segments; ++i) {
         const float start = (float)i / (float)m->segments;
@@ -167,8 +205,7 @@ static void render_bar(vu_meter *m, gs_effect_t *effect, gs_eparam_t *color_para
 
         const float pos0 = (m->direction == 0) ? x + start * w : y + start * h;
         const float pos1 = (m->direction == 0) ? x + end * w : y + end * h;
-
-        const float size = std::max(1.0f, pos1 - pos0 - (float)m->gap);
+        const float size = std::max(1.0f, pos1 - pos0 - gap);
 
         const bool on =
             ((float)i + 1.0f) / (float)m->segments <= frac + 0.0001f;
@@ -185,8 +222,43 @@ static void render_bar(vu_meter *m, gs_effect_t *effect, gs_eparam_t *color_para
         else
             render_rect(effect, color_param, color, x, pos0, w, size);
     }
+}
 
-    (void)segment_width;
+/*
+ * Draws one complete segment at the requested normalized position.
+ * Peak indicators are intentionally segment-sized rather than a 2-pixel
+ * marker, so the indicator remains clearly visible at any OBS scale.
+ */
+static void render_peak_segment(vu_meter *m, gs_effect_t *effect,
+                                gs_eparam_t *color_param,
+                                float x, float y, float w, float h,
+                                float db, uint32_t color)
+{
+    if (!m || !effect || !color_param || m->segments <= 0)
+        return;
+
+    const float frac = level_to_fraction(db, m->min_db);
+    if (frac <= 0.0f)
+        return;
+
+    int index = (int)std::floor(frac * (float)m->segments);
+    index = std::clamp(index, 0, m->segments - 1);
+
+    const float start = (float)index / (float)m->segments;
+    const float end = (float)(index + 1) / (float)m->segments;
+
+    const float pos0 = (m->direction == 0) ? x + start * w : y + start * h;
+    const float pos1 = (m->direction == 0) ? x + end * w : y + end * h;
+
+    const float span = pos1 - pos0;
+    const float gap =
+        std::min((float)m->gap, std::max(0.0f, span - 1.0f));
+    const float size = std::max(1.0f, span - gap);
+
+    if (m->direction == 0)
+        render_rect(effect, color_param, color, pos0, y, size, h);
+    else
+        render_rect(effect, color_param, color, x, pos0, w, size);
 }
 
 static void vu_render(void *data, gs_effect_t *effect_unused)
@@ -205,9 +277,11 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
     float peak[2];
     float hold[2];
     int direction;
+    bool show_peak;
     bool show_hold;
     uint32_t color_background;
     uint32_t color_peak;
+    uint32_t color_hold;
     float min_db;
 
     {
@@ -221,14 +295,15 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
         hold[1] = m->hold[1];
 
         direction = m->direction;
+        show_peak = m->show_peak;
         show_hold = m->show_hold;
         color_background = m->color_background;
         color_peak = m->color_peak;
+        color_hold = m->color_hold;
         min_db = m->min_db;
     }
 
     (void)effect_unused;
-    (void)peak;
 
     /*
      * IMPORTANT — OBS 31.x custom-draw coordinate system:
@@ -241,7 +316,7 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
      * the VU meter render correctly as graphics, but outside the source's
      * transformed rectangle in the OBS scene.
      *
-     * Version 2.1.1 deliberately leaves OBS's graphics coordinate system
+     * Version 2.2 deliberately leaves OBS's graphics coordinate system
      * untouched.  render_rect() applies only local translations, so the VU
      * remains inside the source bounds and follows OBS scaling/positioning.
      */
@@ -257,9 +332,6 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
     gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
     if (!effect) {
         gs_blend_state_pop();
-        gs_matrix_pop();
-        gs_projection_pop();
-        gs_viewport_pop();
         return;
     }
 
@@ -268,27 +340,7 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
 
     if (!color_param) {
         gs_blend_state_pop();
-        gs_matrix_pop();
-        gs_projection_pop();
-        gs_viewport_pop();
         return;
-    }
-
-    /*
-     * Diagnostic: prove that the render thread sees the same changing
-     * levels received by the audio callback.
-     */
-    static float debug_elapsed = 0.0f;
-    debug_elapsed += 1.0f / 60.0f;
-
-    if (debug_elapsed >= 1.0f) {
-        debug_elapsed = 0.0f;
-
-        blog(LOG_INFO,
-             "[OBS VU Meter PRO 2.1.1] render L=%.1f dB (%.3f) "
-             "R=%.1f dB (%.3f)",
-             magnitude[0], level_to_fraction(magnitude[0], min_db),
-             magnitude[1], level_to_fraction(magnitude[1], min_db));
     }
 
     const float outer = 6.0f;
@@ -310,23 +362,27 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
                    outer, outer * 2.0f + bar_h,
                    bar_w, bar_h, magnitude[1]);
 
+        /* Peak Hold is drawn first so the current Peak remains visually dominant. */
         if (show_hold) {
-            const float hold_w1 =
-                bar_w * level_to_fraction(hold[0], min_db);
-            const float hold_w2 =
-                bar_w * level_to_fraction(hold[1], min_db);
+            render_peak_segment(m, effect, color_param,
+                                outer, outer, bar_w, bar_h,
+                                hold[0], color_hold);
 
-            const float hold_y1 = outer + bar_h - 2.0f;
-            const float hold_y2 =
-                outer * 2.0f + bar_h + bar_h - 2.0f;
+            render_peak_segment(m, effect, color_param,
+                                outer, outer * 2.0f + bar_h,
+                                bar_w, bar_h,
+                                hold[1], color_hold);
+        }
 
-            render_rect(effect, color_param, color_peak,
-                        outer + std::max(0.0f, hold_w1 - 1.0f),
-                        hold_y1, 2.0f, 2.0f);
+        if (show_peak) {
+            render_peak_segment(m, effect, color_param,
+                                outer, outer, bar_w, bar_h,
+                                peak[0], color_peak);
 
-            render_rect(effect, color_param, color_peak,
-                        outer + std::max(0.0f, hold_w2 - 1.0f),
-                        hold_y2, 2.0f, 2.0f);
+            render_peak_segment(m, effect, color_param,
+                                outer, outer * 2.0f + bar_h,
+                                bar_w, bar_h,
+                                peak[1], color_peak);
         }
     } else {
         const float bar_w =
@@ -340,6 +396,28 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
         render_bar(m, effect, color_param,
                    outer * 2.0f + bar_w, outer,
                    bar_w, bar_h, magnitude[1]);
+
+        if (show_hold) {
+            render_peak_segment(m, effect, color_param,
+                                outer, outer, bar_w, bar_h,
+                                hold[0], color_hold);
+
+            render_peak_segment(m, effect, color_param,
+                                outer * 2.0f + bar_w, outer,
+                                bar_w, bar_h,
+                                hold[1], color_hold);
+        }
+
+        if (show_peak) {
+            render_peak_segment(m, effect, color_param,
+                                outer, outer, bar_w, bar_h,
+                                peak[0], color_peak);
+
+            render_peak_segment(m, effect, color_param,
+                                outer * 2.0f + bar_w, outer,
+                                bar_w, bar_h,
+                                peak[1], color_peak);
+        }
     }
 
     gs_blend_state_pop();
@@ -420,12 +498,19 @@ static void vu_update(void *data, obs_data_t *settings)
     m->peak_hold_seconds = (float)obs_data_get_double(settings, "peak_hold");
     m->peak_decay_db_per_sec = (float)obs_data_get_double(settings, "peak_decay");
 
-    m->color_green = (uint32_t)obs_data_get_int(settings, "color_green");
-    m->color_yellow = (uint32_t)obs_data_get_int(settings, "color_yellow");
-    m->color_red = (uint32_t)obs_data_get_int(settings, "color_red");
-    m->color_off = (uint32_t)obs_data_get_int(settings, "color_off");
-    m->color_background = (uint32_t)obs_data_get_int(settings, "color_background");
-    m->color_peak = (uint32_t)obs_data_get_int(settings, "color_peak");
+    m->color_green = color_property_to_argb_migrated(
+        obs_data_get_int(settings, "color_green"), 0xFF35E06F);
+    m->color_yellow = color_property_to_argb_migrated(
+        obs_data_get_int(settings, "color_yellow"), 0xFFFFD84D);
+    m->color_red = color_property_to_argb_migrated(
+        obs_data_get_int(settings, "color_red"), 0xFFFF3B30);
+    m->color_off = color_property_to_argb_migrated(
+        obs_data_get_int(settings, "color_off"), 0xFF20252B);
+    m->color_background = color_property_to_argb_migrated(
+        obs_data_get_int(settings, "color_background"), 0xB0101419);
+    m->color_peak = color_property_to_argb_migrated(
+        obs_data_get_int(settings, "color_peak"), 0xFFFFFFFF);
+    m->color_hold = color_property_to_argb(obs_data_get_int(settings, "color_hold"));
 }
 
 static bool enum_source(void *param, obs_source_t *source)
@@ -472,7 +557,8 @@ static obs_properties_t *vu_properties(void *data)
     obs_properties_add_color(props, "color_red", "Cor vermelha");
     obs_properties_add_color(props, "color_off", "LED apagado");
     obs_properties_add_color_alpha(props, "color_background", "Fundo");
-    obs_properties_add_color(props, "color_peak", "Peak Hold");
+    obs_properties_add_color(props, "color_peak", "Peak atual");
+    obs_properties_add_color(props, "color_hold", "Peak Hold");
 
     return props;
 }
@@ -491,12 +577,13 @@ static void vu_defaults(obs_data_t *settings)
     obs_data_set_default_bool(settings, "show_hold", true);
     obs_data_set_default_double(settings, "peak_hold", 1.5);
     obs_data_set_default_double(settings, "peak_decay", 18.0);
-    obs_data_set_default_int(settings, "color_green", 0xFF35E06F);
-    obs_data_set_default_int(settings, "color_yellow", 0xFFFFD84D);
-    obs_data_set_default_int(settings, "color_red", 0xFFFF3B30);
-    obs_data_set_default_int(settings, "color_off", 0xFF20252B);
-    obs_data_set_default_int(settings, "color_background", 0xB0101419);
+    obs_data_set_default_int(settings, "color_green", 0xFF6FE035);
+    obs_data_set_default_int(settings, "color_yellow", 0xFF4DD8FF);
+    obs_data_set_default_int(settings, "color_red", 0xFF303BFF);
+    obs_data_set_default_int(settings, "color_off", 0xFF2B2520);
+    obs_data_set_default_int(settings, "color_background", 0xB0191410);
     obs_data_set_default_int(settings, "color_peak", 0xFFFFFFFF);
+    obs_data_set_default_int(settings, "color_hold", 0xFFFFFF00);
 }
 
 static uint32_t vu_width(void *data)
