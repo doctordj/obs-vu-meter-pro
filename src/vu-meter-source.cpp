@@ -231,23 +231,20 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
     (void)peak;
 
     /*
-     * IMPORTANT:
-     * A custom-draw source is rendered inside the graphics state prepared
-     * by OBS.  Do not assume that the projection, model matrix or viewport
-     * already correspond to this source's own dimensions.
+     * IMPORTANT — OBS 31.x custom-draw coordinate system:
      *
-     * Version 2.1 explicitly establishes a source-local 2D rendering space.
-     * This avoids the situation where the render callback is receiving and
-     * calculating audio correctly, but the rectangles are transformed
-     * outside the source texture.
+     * OBS calls video_render() with the scene/item transform already active.
+     * The source must therefore draw in its own local coordinates, but must
+     * NOT replace OBS's viewport, projection, or current model matrix.
+     *
+     * Version 2.1 incorrectly reset the matrix and viewport here.  That made
+     * the VU meter render correctly as graphics, but outside the source's
+     * transformed rectangle in the OBS scene.
+     *
+     * Version 2.1.1 deliberately leaves OBS's graphics coordinate system
+     * untouched.  render_rect() applies only local translations, so the VU
+     * remains inside the source bounds and follows OBS scaling/positioning.
      */
-    gs_viewport_push();
-    gs_projection_push();
-    gs_matrix_push();
-    gs_matrix_identity();
-
-    gs_set_viewport(0, 0, (int)cx, (int)cy);
-    gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
 
     /*
      * Make the custom source independent of the blend state inherited from
@@ -288,7 +285,7 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
         debug_elapsed = 0.0f;
 
         blog(LOG_INFO,
-             "[OBS VU Meter PRO 2.1] render L=%.1f dB (%.3f) "
+             "[OBS VU Meter PRO 2.1.1] render L=%.1f dB (%.3f) "
              "R=%.1f dB (%.3f)",
              magnitude[0], level_to_fraction(magnitude[0], min_db),
              magnitude[1], level_to_fraction(magnitude[1], min_db));
@@ -346,9 +343,6 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
     }
 
     gs_blend_state_pop();
-    gs_matrix_pop();
-    gs_projection_pop();
-    gs_viewport_pop();
 }
 
 static void vu_tick(void *data, float seconds)
