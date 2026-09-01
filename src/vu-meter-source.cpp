@@ -205,8 +205,17 @@ static void render_bar(vu_meter *m, gs_effect_t *effect, gs_eparam_t *color_para
         const float start = (float)i / (float)m->segments;
         const float end = (float)(i + 1) / (float)m->segments;
 
-        const float pos0 = (m->direction == 0) ? x + start * w : y + start * h;
-        const float pos1 = (m->direction == 0) ? x + end * w : y + end * h;
+        /*
+         * Horizontal: fills from left to right.
+         * Vertical: fills from bottom to top, as expected for a
+         * conventional VU meter rotated 90 degrees.
+         */
+        const float pos0 = (m->direction == 0)
+            ? x + start * w
+            : y + (1.0f - end) * h;
+        const float pos1 = (m->direction == 0)
+            ? x + end * w
+            : y + (1.0f - start) * h;
         const float size = std::max(1.0f, pos1 - pos0 - gap);
 
         const bool on =
@@ -249,8 +258,16 @@ static void render_peak_segment(vu_meter *m, gs_effect_t *effect,
     const float start = (float)index / (float)m->segments;
     const float end = (float)(index + 1) / (float)m->segments;
 
-    const float pos0 = (m->direction == 0) ? x + start * w : y + start * h;
-    const float pos1 = (m->direction == 0) ? x + end * w : y + end * h;
+    /*
+     * Keep Peak / Peak Hold aligned with the same bottom-to-top
+     * orientation used by the active meter segments.
+     */
+    const float pos0 = (m->direction == 0)
+        ? x + start * w
+        : y + (1.0f - end) * h;
+    const float pos1 = (m->direction == 0)
+        ? x + end * w
+        : y + (1.0f - start) * h;
 
     const float span = pos1 - pos0;
     const float gap =
