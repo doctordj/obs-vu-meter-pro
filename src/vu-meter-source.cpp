@@ -36,11 +36,13 @@ struct vu_meter {
     int gap = 3;
     int thickness = 10;
     int direction = 0; // 0 horizontal, 1 vertical
+    int meter_mode = 0; // 0 stereo (L/R), 1 single bar
+    int mono_channel = 0; // 0 left, 1 right
     bool show_peak = true;
     bool show_hold = true;
     float peak_hold_seconds = 1.5f;
     float peak_decay_db_per_sec = 18.0f;
-    bool rounded = false; // reserved for v1.1 renderer
+    bool rounded = false; // reserved for future rounded renderer
 
     uint32_t color_green = 0xFF35E06F;
     uint32_t color_yellow = 0xFFFFD84D;
@@ -277,12 +279,13 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
     float peak[2];
     float hold[2];
     int direction;
+    int meter_mode;
+    int mono_channel;
     bool show_peak;
     bool show_hold;
     uint32_t color_background;
     uint32_t color_peak;
     uint32_t color_hold;
-    float min_db;
 
     {
         std::lock_guard<std::mutex> lock(m->level_mutex);
@@ -295,35 +298,20 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
         hold[1] = m->hold[1];
 
         direction = m->direction;
+        meter_mode = m->meter_mode;
+        mono_channel = m->mono_channel;
         show_peak = m->show_peak;
         show_hold = m->show_hold;
         color_background = m->color_background;
         color_peak = m->color_peak;
         color_hold = m->color_hold;
-        min_db = m->min_db;
     }
 
     (void)effect_unused;
 
     /*
-     * IMPORTANT — OBS 31.x custom-draw coordinate system:
-     *
-     * OBS calls video_render() with the scene/item transform already active.
-     * The source must therefore draw in its own local coordinates, but must
-     * NOT replace OBS's viewport, projection, or current model matrix.
-     *
-     * Version 2.1 incorrectly reset the matrix and viewport here.  That made
-     * the VU meter render correctly as graphics, but outside the source's
-     * transformed rectangle in the OBS scene.
-     *
-     * Version 2.2 deliberately leaves OBS's graphics coordinate system
-     * untouched.  render_rect() applies only local translations, so the VU
-     * remains inside the source bounds and follows OBS scaling/positioning.
-     */
-
-    /*
-     * Make the custom source independent of the blend state inherited from
-     * whatever source was rendered before it.
+     * OBS already provides the correct source-local graphics transform.
+     * Do not replace its viewport/projection/model matrix here.
      */
     gs_blend_state_push();
     gs_enable_blending(true);
@@ -345,78 +333,129 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
 
     const float outer = 6.0f;
 
-    /* Draw the source background first. */
+    /* Clean background, including alpha configured by the user. */
     render_rect(effect, color_param, color_background,
                 0.0f, 0.0f, (float)cx, (float)cy);
 
+    /*
+     * Refined layout:
+     * - Stereo: two independent L/R bars.
+     * - Single: one full-width/full-height bar using the selected L or R
+     *   channel. This is useful for placing one meter on each side of a
+     *   composition.
+     *
+     * We deliberately keep the source dimensions stable per orientation,
+     * so existing OBS scene transforms do not jump unexpectedly.
+     */
     if (direction == 0) {
-        const float bar_h =
-            std::max(1.0f, ((float)cy - outer * 3.0f) / 2.0f);
-        const float bar_w =
-            std::max(1.0f, (float)cx - outer * 2.0f);
+        if (meter_mode == 1) {
+            const float bar_x = outer;
+            const float bar_y = outer;
+            const float bar_w = std::max(1.0f, (float)cx - outer * 2.0f);
+            const float bar_h = std::max(1.0f, (float)cy - outer * 2.0f);
+            const int ch = mono_channel == 1 ? 1 : 0;
 
-        render_bar(m, effect, color_param,
-                   outer, outer, bar_w, bar_h, magnitude[0]);
+            render_bar(m, effect, color_param,
+                       bar_x, bar_y, bar_w, bar_h, magnitude[ch]);
 
-        render_bar(m, effect, color_param,
-                   outer, outer * 2.0f + bar_h,
-                   bar_w, bar_h, magnitude[1]);
+            if (show_hold)
+                render_peak_segment(m, effect, color_param,
+                                    bar_x, bar_y, bar_w, bar_h,
+                                    hold[ch], color_hold);
 
-        /* Peak Hold is drawn first so the current Peak remains visually dominant. */
-        if (show_hold) {
-            render_peak_segment(m, effect, color_param,
-                                outer, outer, bar_w, bar_h,
-                                hold[0], color_hold);
+            if (show_peak)
+                render_peak_segment(m, effect, color_param,
+                                    bar_x, bar_y, bar_w, bar_h,
+                                    peak[ch], color_peak);
+        } else {
+            const float bar_h =
+                std::max(1.0f, ((float)cy - outer * 3.0f) / 2.0f);
+            const float bar_w =
+                std::max(1.0f, (float)cx - outer * 2.0f);
 
-            render_peak_segment(m, effect, color_param,
-                                outer, outer * 2.0f + bar_h,
-                                bar_w, bar_h,
-                                hold[1], color_hold);
-        }
+            render_bar(m, effect, color_param,
+                       outer, outer, bar_w, bar_h, magnitude[0]);
 
-        if (show_peak) {
-            render_peak_segment(m, effect, color_param,
-                                outer, outer, bar_w, bar_h,
-                                peak[0], color_peak);
+            render_bar(m, effect, color_param,
+                       outer, outer * 2.0f + bar_h,
+                       bar_w, bar_h, magnitude[1]);
 
-            render_peak_segment(m, effect, color_param,
-                                outer, outer * 2.0f + bar_h,
-                                bar_w, bar_h,
-                                peak[1], color_peak);
+            if (show_hold) {
+                render_peak_segment(m, effect, color_param,
+                                    outer, outer, bar_w, bar_h,
+                                    hold[0], color_hold);
+
+                render_peak_segment(m, effect, color_param,
+                                    outer, outer * 2.0f + bar_h,
+                                    bar_w, bar_h,
+                                    hold[1], color_hold);
+            }
+
+            if (show_peak) {
+                render_peak_segment(m, effect, color_param,
+                                    outer, outer, bar_w, bar_h,
+                                    peak[0], color_peak);
+
+                render_peak_segment(m, effect, color_param,
+                                    outer, outer * 2.0f + bar_h,
+                                    bar_w, bar_h,
+                                    peak[1], color_peak);
+            }
         }
     } else {
-        const float bar_w =
-            std::max(1.0f, ((float)cx - outer * 3.0f) / 2.0f);
-        const float bar_h =
-            std::max(1.0f, (float)cy - outer * 2.0f);
+        if (meter_mode == 1) {
+            const float bar_x = outer;
+            const float bar_y = outer;
+            const float bar_w = std::max(1.0f, (float)cx - outer * 2.0f);
+            const float bar_h = std::max(1.0f, (float)cy - outer * 2.0f);
+            const int ch = mono_channel == 1 ? 1 : 0;
 
-        render_bar(m, effect, color_param,
-                   outer, outer, bar_w, bar_h, magnitude[0]);
+            render_bar(m, effect, color_param,
+                       bar_x, bar_y, bar_w, bar_h, magnitude[ch]);
 
-        render_bar(m, effect, color_param,
-                   outer * 2.0f + bar_w, outer,
-                   bar_w, bar_h, magnitude[1]);
+            if (show_hold)
+                render_peak_segment(m, effect, color_param,
+                                    bar_x, bar_y, bar_w, bar_h,
+                                    hold[ch], color_hold);
 
-        if (show_hold) {
-            render_peak_segment(m, effect, color_param,
-                                outer, outer, bar_w, bar_h,
-                                hold[0], color_hold);
+            if (show_peak)
+                render_peak_segment(m, effect, color_param,
+                                    bar_x, bar_y, bar_w, bar_h,
+                                    peak[ch], color_peak);
+        } else {
+            const float bar_w =
+                std::max(1.0f, ((float)cx - outer * 3.0f) / 2.0f);
+            const float bar_h =
+                std::max(1.0f, (float)cy - outer * 2.0f);
 
-            render_peak_segment(m, effect, color_param,
-                                outer * 2.0f + bar_w, outer,
-                                bar_w, bar_h,
-                                hold[1], color_hold);
-        }
+            render_bar(m, effect, color_param,
+                       outer, outer, bar_w, bar_h, magnitude[0]);
 
-        if (show_peak) {
-            render_peak_segment(m, effect, color_param,
-                                outer, outer, bar_w, bar_h,
-                                peak[0], color_peak);
+            render_bar(m, effect, color_param,
+                       outer * 2.0f + bar_w, outer,
+                       bar_w, bar_h, magnitude[1]);
 
-            render_peak_segment(m, effect, color_param,
-                                outer * 2.0f + bar_w, outer,
-                                bar_w, bar_h,
-                                peak[1], color_peak);
+            if (show_hold) {
+                render_peak_segment(m, effect, color_param,
+                                    outer, outer, bar_w, bar_h,
+                                    hold[0], color_hold);
+
+                render_peak_segment(m, effect, color_param,
+                                    outer * 2.0f + bar_w, outer,
+                                    bar_w, bar_h,
+                                    hold[1], color_hold);
+            }
+
+            if (show_peak) {
+                render_peak_segment(m, effect, color_param,
+                                    outer, outer, bar_w, bar_h,
+                                    peak[0], color_peak);
+
+                render_peak_segment(m, effect, color_param,
+                                    outer * 2.0f + bar_w, outer,
+                                    bar_w, bar_h,
+                                    peak[1], color_peak);
+            }
         }
     }
 
@@ -492,7 +531,9 @@ static void vu_update(void *data, obs_data_t *settings)
     m->segments = std::clamp((int)obs_data_get_int(settings, "segments"), 8, 96);
     m->gap = std::clamp((int)obs_data_get_int(settings, "gap"), 0, 12);
     m->thickness = std::clamp((int)obs_data_get_int(settings, "thickness"), 2, 40);
-    m->direction = (int)obs_data_get_int(settings, "direction");
+    m->direction = std::clamp((int)obs_data_get_int(settings, "direction"), 0, 1);
+    m->meter_mode = std::clamp((int)obs_data_get_int(settings, "meter_mode"), 0, 1);
+    m->mono_channel = std::clamp((int)obs_data_get_int(settings, "mono_channel"), 0, 1);
     m->show_peak = obs_data_get_bool(settings, "show_peak");
     m->show_hold = obs_data_get_bool(settings, "show_hold");
     m->peak_hold_seconds = (float)obs_data_get_double(settings, "peak_hold");
@@ -525,6 +566,25 @@ static bool enum_source(void *param, obs_source_t *source)
     return true;
 }
 
+static bool vu_meter_properties_modified(obs_properties_t *props,
+                                           obs_property_t *property,
+                                           obs_data_t *settings)
+{
+    (void)property;
+
+    if (!props || !settings)
+        return false;
+
+    obs_property_t *channel = obs_properties_get(props, "mono_channel");
+    if (!channel)
+        return false;
+
+    const bool single = obs_data_get_int(settings, "meter_mode") == 1;
+    obs_property_set_visible(channel, single);
+
+    return true;
+}
+
 static obs_properties_t *vu_properties(void *data)
 {
     (void)data;
@@ -547,6 +607,18 @@ static obs_properties_t *vu_properties(void *data)
     obs_property_list_add_int(direction, "Horizontal", 0);
     obs_property_list_add_int(direction, "Vertical", 1);
 
+    obs_property_t *meter_mode = obs_properties_add_list(
+        props, "meter_mode", "Modo do medidor",
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(meter_mode, "Estéreo — L + R", 0);
+    obs_property_list_add_int(meter_mode, "Barra única", 1);
+
+    obs_property_t *mono_channel = obs_properties_add_list(
+        props, "mono_channel", "Canal da barra única",
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(mono_channel, "L — Esquerdo", 0);
+    obs_property_list_add_int(mono_channel, "R — Direito", 1);
+
     obs_properties_add_bool(props, "show_peak", "Mostrar Peak");
     obs_properties_add_bool(props, "show_hold", "Mostrar Peak Hold");
     obs_properties_add_float_slider(props, "peak_hold", "Tempo do Peak Hold (s)", 0.1, 10.0, 0.1);
@@ -559,6 +631,15 @@ static obs_properties_t *vu_properties(void *data)
     obs_properties_add_color_alpha(props, "color_background", "Fundo");
     obs_properties_add_color(props, "color_peak", "Peak atual");
     obs_properties_add_color(props, "color_hold", "Peak Hold");
+
+    /*
+     * The L/R selector is relevant only in Single Bar mode.
+     * Attach the modification callback to the mode property itself and
+     * initialize the selector as hidden for the default Stereo mode.
+     */
+    obs_property_set_modified_callback(meter_mode, vu_meter_properties_modified);
+
+    obs_property_set_visible(mono_channel, false);
 
     return props;
 }
@@ -573,6 +654,8 @@ static void vu_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, "gap", 3);
     obs_data_set_default_int(settings, "thickness", 10);
     obs_data_set_default_int(settings, "direction", 0);
+    obs_data_set_default_int(settings, "meter_mode", 0);
+    obs_data_set_default_int(settings, "mono_channel", 0);
     obs_data_set_default_bool(settings, "show_peak", true);
     obs_data_set_default_bool(settings, "show_hold", true);
     obs_data_set_default_double(settings, "peak_hold", 1.5);
