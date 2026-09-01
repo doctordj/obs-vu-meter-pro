@@ -25,10 +25,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 if(MSVC)
-    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE /W4 /permissive-)
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE /W4 /permissive- /std:c++20)
 endif()
 
-target_compile_features(${CMAKE_PROJECT_NAME} PRIVATE cxx_std_17)
+target_compile_features(${CMAKE_PROJECT_NAME} PRIVATE cxx_std_20)
 
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     PLUGIN_VERSION="${PROJECT_VERSION}"
