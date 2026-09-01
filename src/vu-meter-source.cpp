@@ -141,18 +141,11 @@ static void render_rect(gs_effect_t *effect, gs_eparam_t *color_param,
     gs_matrix_push();
     gs_matrix_translate3f(x, y, 0.0f);
 
-    gs_technique_t *tech = gs_effect_get_technique(effect, "Solid");
-    if (tech) {
-        const size_t passes = gs_technique_begin(tech);
-        for (size_t i = 0; i < passes; ++i) {
-            if (gs_technique_begin_pass(tech, i)) {
-                gs_draw_sprite(nullptr, 0,
-                               (uint32_t)std::ceil(w),
-                               (uint32_t)std::ceil(h));
-                gs_technique_end_pass(tech);
-            }
-        }
-        gs_technique_end(tech);
+    /* Use the same Solid-effect loop used by OBS itself for color rectangles. */
+    while (gs_effect_loop(effect, "Solid")) {
+        gs_draw_sprite(nullptr, 0,
+                       (uint32_t)std::max(1.0f, std::round(w)),
+                       (uint32_t)std::max(1.0f, std::round(h)));
     }
 
     gs_matrix_pop();
@@ -230,6 +223,17 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
     (void)peak;
     (void)segments;
     (void)gap;
+
+    /* Diagnostic: prove that the render thread sees the changing audio level. */
+    static float debug_elapsed = 0.0f;
+    debug_elapsed += 1.0f / 60.0f;
+    if (debug_elapsed >= 1.0f) {
+        debug_elapsed = 0.0f;
+        blog(LOG_INFO,
+             "[OBS VU Meter PRO] render L=%.1f dB (%.3f) R=%.1f dB (%.3f)",
+             magnitude[0], level_to_fraction(magnitude[0], min_db),
+             magnitude[1], level_to_fraction(magnitude[1], min_db));
+    }
 
     gs_set_2d_mode();
 
