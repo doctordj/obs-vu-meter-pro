@@ -285,9 +285,9 @@ static void vu_update(void *data, obs_data_t *settings)
     m->min_db = (float)obs_data_get_double(settings, "min_db");
     m->warning_db = (float)obs_data_get_double(settings, "warning_db");
     m->error_db = (float)obs_data_get_double(settings, "error_db");
-    m->segments = std::clamp(obs_data_get_int(settings, "segments"), 8, 96);
-    m->gap = std::clamp(obs_data_get_int(settings, "gap"), 0, 12);
-    m->thickness = std::clamp(obs_data_get_int(settings, "thickness"), 2, 40);
+    m->segments = std::clamp((int)obs_data_get_int(settings, "segments"), 8, 96);
+    m->gap = std::clamp((int)obs_data_get_int(settings, "gap"), 0, 12);
+    m->thickness = std::clamp((int)obs_data_get_int(settings, "thickness"), 2, 40);
     m->direction = (int)obs_data_get_int(settings, "direction");
     m->show_peak = obs_data_get_bool(settings, "show_peak");
     m->show_hold = obs_data_get_bool(settings, "show_hold");
@@ -401,5 +401,5 @@ struct obs_source_info vu_meter_source_info = {
     .video_tick = vu_tick,
     .get_width = vu_width,
     .get_height = vu_height,
-    .icon_type = OBS_ICON_TYPE_METER,
+    .icon_type = OBS_ICON_TYPE_CUSTOM,
 };
