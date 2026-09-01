@@ -248,8 +248,6 @@ static void *vu_create(obs_data_t *settings, obs_source_t *source)
     if (m->volmeter)
         obs_volmeter_add_callback(m->volmeter, meter_callback, m);
 
-    if (settings)
-        ;
     return m;
 }
 
