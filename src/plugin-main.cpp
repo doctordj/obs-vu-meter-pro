@@ -12,7 +12,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
     obs_register_source(&vu_meter_source_info);
-    blog(LOG_INFO, "[OBS VU Meter PRO] loaded - version %s", PLUGIN_VERSION);
+    blog(LOG_INFO, "[OBS VU Meter PRO] loaded");
     return true;
 }
 
