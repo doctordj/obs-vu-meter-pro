@@ -522,22 +522,6 @@ static void draw_db_scale(gs_effect_t *effect, gs_eparam_t *color_param,
     }
 }
 
-static void render_top_meter(gs_effect_t *effect, gs_eparam_t *color_param,
-                             float x, float y, float w, float value,
-                             const char *label, uint32_t color)
-{
-    draw_centered_text(effect, color_param, label, x + w * 0.5f, y, 1.0f,
-                       0xFFE5E7EB);
-    render_frame(effect, color_param, 0xFF454B53, x, y + 12.0f, w, 12.0f, 1.0f);
-    render_rect(effect, color_param, 0xFF11151A, x + 2.0f, y + 14.0f, w - 4.0f, 8.0f);
-    const float frac = std::clamp((value + 1.0f) * 0.5f, 0.0f, 1.0f);
-    render_rect(effect, color_param, color,
-                x + 2.0f + frac * (w - 8.0f), y + 12.0f, 4.0f, 12.0f);
-    draw_centered_text(effect, color_param, "-1", x + 4.0f, y + 27.0f, 0.8f, 0xFF9CA3AF);
-    draw_centered_text(effect, color_param, "0", x + w * 0.5f, y + 27.0f, 0.8f, 0xFF9CA3AF);
-    draw_centered_text(effect, color_param, "+1", x + w - 5.0f, y + 27.0f, 0.8f, 0xFF9CA3AF);
-}
-
 static void render_professional_channel(vu_meter *m, gs_effect_t *effect,
                                          gs_eparam_t *color_param,
                                          float x, float y, float w, float h,
@@ -587,18 +571,12 @@ static void render_professional_panel(vu_meter *m, gs_effect_t *effect,
     render_rect(effect, color_param, 0xFF0A0D11, 0, 0, w, h);
     render_frame(effect, color_param, style_frame_color(m), 4, 4, w - 8, h - 8, 2.0f);
 
-    draw_text(effect, color_param, "VU METER PRO", 16, 12, 1.6f, 0xFFE5E7EB);
     draw_text(effect, color_param, "PROFESSIONAL", 17, 25, 0.8f, 0xFF6B7280);
 
-    const float top_y = 42.0f;
-    render_top_meter(effect, color_param, 18, top_y, w - 36.0f,
-                     std::clamp((m->magnitude[0] - m->magnitude[1]) / 20.0f, -1.0f, 1.0f),
-                     "BALANCE", 0xFF00D4FF);
-    render_top_meter(effect, color_param, 18, top_y + 42.0f, w - 36.0f,
-                     std::clamp((m->peak[0] + m->peak[1]) / 2.0f / 20.0f, -1.0f, 1.0f),
-                     "CORRELATION", 0xFF00D4FF);
-
-    const float meter_y = 118.0f;
+    /* The professional panel intentionally contains only the audio level
+       meters. Balance and Correlation indicators were removed because they
+       were not sufficiently clear/useful in this plugin's presentation. */
+    const float meter_y = 42.0f;
     const float gap = 18.0f;
     if (m->meter_mode == METER_SINGLE) {
         const int ch = m->mono_channel == 1 ? 1 : 0;
