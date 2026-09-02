@@ -237,6 +237,93 @@ static void render_rect(gs_effect_t *effect, gs_eparam_t *color_param,
     gs_matrix_pop();
 }
 
+static void render_circle(gs_effect_t *effect, gs_eparam_t *color_param,
+                           uint32_t color, float cx, float cy, float radius)
+{
+    if (radius <= 1.0f)
+        return;
+    /* A filled circle made from horizontal scanlines. This avoids relying on
+       platform-specific vector primitives and renders consistently in OBS. */
+    const int r = (int)std::ceil(radius);
+    for (int iy = -r; iy <= r; ++iy) {
+        const float yy = (float)iy;
+        const float inside = radius * radius - yy * yy;
+        if (inside < 0.0f)
+            continue;
+        const float half = std::sqrt(inside);
+        render_rect(effect, color_param, color,
+                    cx - half, cy + yy, std::max(1.0f, half * 2.0f), 1.2f);
+    }
+}
+
+static void render_ring(gs_effect_t *effect, gs_eparam_t *color_param,
+                        uint32_t color, float cx, float cy,
+                        float outer, float inner)
+{
+    if (outer <= inner || inner < 0.0f)
+        return;
+    const int r = (int)std::ceil(outer);
+    const float outer2 = outer * outer;
+    const float inner2 = inner * inner;
+    for (int iy = -r; iy <= r; ++iy) {
+        const float yy = (float)iy;
+        const float oy = outer2 - yy * yy;
+        if (oy <= 0.0f)
+            continue;
+        const float half_outer = std::sqrt(oy);
+        const float iy2 = yy * yy;
+        const float half_inner = inner2 > iy2 ? std::sqrt(inner2 - iy2) : 0.0f;
+        if (half_outer > half_inner) {
+            render_rect(effect, color_param, color,
+                        cx - half_outer, cy + yy,
+                        std::max(1.0f, half_outer - half_inner), 1.2f);
+            if (half_inner > 0.0f)
+                render_rect(effect, color_param, color,
+                            cx + half_inner, cy + yy,
+                            std::max(1.0f, half_outer - half_inner), 1.2f);
+        }
+    }
+}
+
+static void render_dial_tick(gs_effect_t *effect, gs_eparam_t *color_param,
+                             uint32_t color, float cx, float cy,
+                             float angle, float r1, float r2, float width)
+{
+    /* Build a short angled tick from tiny overlapping rectangles. */
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    const int steps = std::max(2, (int)std::ceil(std::abs(r2 - r1) / 2.0f));
+    for (int i = 0; i <= steps; ++i) {
+        const float t = (float)i / (float)steps;
+        const float r = r1 + (r2 - r1) * t;
+        const float px = cx + c * r;
+        const float py = cy + s * r;
+        render_rect(effect, color_param, color,
+                    px - width * 0.5f, py - width * 0.5f,
+                    width, width);
+    }
+}
+
+static void render_needle(gs_effect_t *effect,
+                          gs_eparam_t *color_param, float cx, float cy,
+                          float angle, float length, uint32_t color)
+{
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    const int steps = std::max(4, (int)std::ceil(length / 2.0f));
+    for (int i = 0; i <= steps; ++i) {
+        const float t = (float)i / (float)steps;
+        const float r = length * t;
+        const float px = cx + c * r;
+        const float py = cy + s * r;
+        const float ww = (i < 2) ? 3.0f : 2.0f;
+        render_rect(effect, color_param, color,
+                    px - ww * 0.5f, py - ww * 0.5f, ww, ww);
+    }
+    render_circle(effect, color_param, 0xFF151515, cx, cy, 7.0f);
+    render_ring(effect, color_param, 0xFFC8C8C8, cx, cy, 7.0f, 5.0f);
+}
+
 static void render_frame(gs_effect_t *effect, gs_eparam_t *color_param,
                          uint32_t color, float x, float y, float w, float h,
                          float border)
@@ -704,52 +791,86 @@ static void render_analog_professional(vu_meter *m, gs_effect_t *effect,
                                         float x, float y, float w, float h,
                                         float db, const char *label)
 {
-    if (layout_draws_background(m)) {
-        render_bevel_panel(effect, color_param, x, y, w, h,
-                           0xFF29241D, 0xFF7C6C54, 0xFF090806, 5.0f);
-        render_bevel_panel(effect, color_param, x + 7.0f, y + 7.0f,
-                           w - 14.0f, h - 14.0f,
-                           0xFFD9CEA8, 0xFFF3E9C7, 0xFF756C54, 3.0f);
-    } else {
-        render_frame(effect, color_param, 0xFFD0C090, x, y, w, h, 2.0f);
-    }
-    draw_centered_text(effect, color_param, label,
-                       x + w * 0.5f, y + 11.0f, 1.0f, 0xFF2E281D);
+    /* A true hardware-style analog meter: textured chassis, recessed cream
+       dial, circular scale, major/minor ticks, red zone, needle and hub. */
+    render_bevel_panel(effect, color_param, x, y, w, h,
+                       0xFF25282B, 0xFF777D82, 0xFF070809, 6.0f);
+    render_bevel_panel(effect, color_param, x + 7.0f, y + 7.0f,
+                       w - 14.0f, h - 14.0f,
+                       0xFF4A4C4C, 0xFF9A9D9C, 0xFF171818, 4.0f);
+
+    const float ix = x + 16.0f;
+    const float iy = y + 16.0f;
+    const float iw = std::max(20.0f, w - 32.0f);
+    const float ih = std::max(20.0f, h - 32.0f);
+    render_bevel_panel(effect, color_param, ix, iy, iw, ih,
+                       0xFFD8CCAA, 0xFFF7EBC5, 0xFF655B48, 3.0f);
 
     const float cx = x + w * 0.5f;
-    const float cy = y + h * 0.67f;
-    const float radius = std::min(w, h) * 0.40f;
-    const float frac = level_to_fraction(db, m->min_db);
+    const float cy = y + h * 0.70f;
+    const float radius = std::max(20.0f, std::min(w * 0.43f, h * 0.49f));
 
-    /* Dial ticks. */
-    for (int i = 0; i <= 20; ++i) {
-        const float a = -2.55f + (float)i * 2.55f / 20.0f;
-        const float r1 = radius;
-        const float r2 = radius - ((i % 2 == 0) ? 11.0f : 7.0f);
-        const float x1 = cx + std::cos(a) * r1;
-        const float y1 = cy + std::sin(a) * r1;
-        const float x2 = cx + std::cos(a) * r2;
-        const float y2 = cy + std::sin(a) * r2;
-        render_rect(effect, color_param, i >= 16 ? 0xFF9A3036 : 0xFF4B402F,
-                    std::min(x1, x2), std::min(y1, y2),
-                    std::max(1.0f, std::abs(x2 - x1) + 1.5f),
-                    std::max(1.0f, std::abs(y2 - y1) + 1.5f));
+    /* Dial face with subtle concentric depth. */
+    render_circle(effect, color_param, 0xFFB8AC8E, cx + 2.0f, cy + 2.0f, radius + 2.0f);
+    render_circle(effect, color_param, 0xFFE8DDBA, cx, cy, radius);
+    render_ring(effect, color_param, 0xFF8B8068, cx, cy, radius, radius - 2.0f);
+    render_ring(effect, color_param, 0xFFF5EBCB, cx, cy, radius - 4.0f, radius - 5.0f);
+
+    draw_centered_text(effect, color_param, label, cx, y + 28.0f,
+                       1.15f, 0xFF211D16);
+    draw_centered_text(effect, color_param, "VU", cx, y + 45.0f,
+                       0.72f, 0xFF756A54);
+
+    /* Scale: -60 to 0 dB, with a clear red overload region. */
+    const float start_angle = -2.52f;
+    const float end_angle = -0.62f;
+    for (int i = 0; i <= 30; ++i) {
+        const float a = start_angle + (end_angle - start_angle) *
+                        ((float)i / 30.0f);
+        const bool major = (i % 5 == 0);
+        const bool red = i >= 25;
+        render_dial_tick(effect, color_param,
+                         red ? 0xFFB32027 : 0xFF332D23,
+                         cx, cy, a,
+                         radius - 9.0f,
+                         radius - (major ? 27.0f : 20.0f),
+                         major ? 3.0f : 2.0f);
     }
 
-    const float angle = -2.55f + frac * 2.55f;
-    const float nx = cx + std::cos(angle) * (radius - 15.0f);
-    const float ny = cy + std::sin(angle) * (radius - 15.0f);
-    render_rect(effect, color_param, 0xFF5C161A,
-                std::min(cx, nx), std::min(cy, ny),
-                std::max(2.0f, std::abs(nx - cx) + 2.0f),
-                std::max(2.0f, std::abs(ny - cy) + 2.0f));
-    render_rect(effect, color_param, 0xFF1C1710,
-                cx - 5.0f, cy - 5.0f, 10.0f, 10.0f);
+    /* Numeric scale labels. */
+    const char *labels[] = {"-60", "-40", "-20", "-10", "-5", "0"};
+    for (int i = 0; i < 6; ++i) {
+        const float a = start_angle + (end_angle - start_angle) *
+                        ((float)i / 5.0f);
+        const float lr = radius - 42.0f;
+        draw_centered_text(effect, color_param, labels[i],
+                           cx + std::cos(a) * lr,
+                           cy + std::sin(a) * lr - 4.0f,
+                           0.62f,
+                           (i >= 4) ? 0xFF9C242A : 0xFF433A2B);
+    }
 
+    /* Red overload arc made from small illuminated marks. */
+    for (int i = 25; i <= 30; ++i) {
+        const float a = start_angle + (end_angle - start_angle) *
+                        ((float)i / 30.0f);
+        render_dial_tick(effect, color_param, 0xFFD83A40,
+                         cx, cy, a, radius - 12.0f, radius - 7.0f, 3.0f);
+    }
+
+    const float frac = level_to_fraction(db, m->min_db);
+    const float angle = start_angle + frac * (end_angle - start_angle);
+    render_needle(effect, color_param, cx, cy, angle,
+                  radius - 18.0f, 0xFF9D2027);
+
+    /* Mechanical scale plate and readout. */
+    render_bevel_panel(effect, color_param,
+                       cx - 43.0f, y + h - 38.0f, 86.0f, 20.0f,
+                       0xFF2A2721, 0xFF716A5B, 0xFF11100D, 2.0f);
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%+.1f dB", db);
-    draw_centered_text(effect, color_param, buf,
-                       cx, y + h - 19.0f, 0.8f, 0xFF2E281D);
+    draw_centered_text(effect, color_param, buf, cx, y + h - 33.0f,
+                       0.68f, 0xFFF0E5C5);
 }
 
 static void render_layout(vu_meter *m, gs_effect_t *effect,
