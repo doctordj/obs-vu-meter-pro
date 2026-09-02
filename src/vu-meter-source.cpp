@@ -553,6 +553,26 @@ static void draw_centered_text(gs_effect_t *effect, gs_eparam_t *color_param,
               y, scale, color);
 }
 
+static bool layout_draws_background(const vu_meter *m)
+{
+    if (!m)
+        return false;
+
+    // In transparent/chroma modes the OBS-level background must remain
+    // visible so the user can key it out. Professional/analog layouts
+    // otherwise draw their own 3D chassis.
+    if (m->background_mode == BG_TRANSPARENT ||
+        m->background_mode == BG_CHROMA_GREEN ||
+        m->background_mode == BG_CHROMA_BLUE)
+        return false;
+
+    return m->layout == LAYOUT_PRO_PANEL ||
+           m->layout == LAYOUT_DOUBLE_SCALE ||
+           m->layout == LAYOUT_VERTICAL_PANEL ||
+           m->layout == LAYOUT_ANALOG ||
+           m->layout == LAYOUT_ANALOG_VERTICAL;
+}
+
 static void render_professional_panel(vu_meter *m, gs_effect_t *effect,
                                        gs_eparam_t *color_param,
                                        float w, float h)
