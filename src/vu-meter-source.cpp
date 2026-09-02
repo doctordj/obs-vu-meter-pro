@@ -311,40 +311,6 @@ static void render_peak_segment(vu_meter *m, gs_effect_t *effect,
     }
 }
 
-static void render_analog(vu_meter *m, gs_effect_t *effect,
-                          gs_eparam_t *color_param,
-                          float x, float y, float w, float h,
-                          float db, bool vertical)
-{
-    const uint32_t frame = style_frame_color(m);
-    render_rect(effect, color_param, 0xFF07090B, x, y, w, h);
-    render_frame(effect, color_param, frame, x, y, w, h, 3.0f);
-
-    const float frac = level_to_fraction(db, m->min_db);
-
-    if (!vertical) {
-        /* Track */
-        render_rect(effect, color_param, 0xFF171A1E,
-                     x + 8.0f, y + h * 0.35f, w - 16.0f, h * 0.30f);
-        render_segment_bar(m, effect, color_param,
-                           x + 8.0f, y + h * 0.35f, w - 16.0f, h * 0.30f,
-                           db, false);
-        /* Needle */
-        const float nx = x + 8.0f + frac * (w - 16.0f);
-        render_rect(effect, color_param, 0xFFFFFFFF,
-                    nx - 1.5f, y + 4.0f, 3.0f, h - 8.0f);
-    } else {
-        render_rect(effect, color_param, 0xFF171A1E,
-                     x + w * 0.35f, y + 8.0f, w * 0.30f, h - 16.0f);
-        render_segment_bar(m, effect, color_param,
-                           x + w * 0.35f, y + 8.0f,
-                           w * 0.30f, h - 16.0f, db, true);
-        const float ny = y + (1.0f - frac) * (h - 16.0f) + 8.0f;
-        render_rect(effect, color_param, 0xFFFFFFFF,
-                    x + 4.0f, ny - 1.5f, w - 8.0f, 3.0f);
-    }
-}
-
 static void render_stereo_horizontal(vu_meter *m, gs_effect_t *effect,
                                       gs_eparam_t *color_param,
                                       float x, float y, float w, float h,
