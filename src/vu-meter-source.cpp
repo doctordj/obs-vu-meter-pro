@@ -86,6 +86,7 @@ struct vu_meter {
     uint32_t color_peak = 0xFFFFFFFF;
     uint32_t color_hold = 0xFF00FFFF;
     uint32_t color_frame = 0xFF353B43;
+    bool preserve_chroma = true;
 };
 
 static const char *vu_name(void *)
@@ -243,6 +244,68 @@ static void render_frame(gs_effect_t *effect, gs_eparam_t *color_param,
     render_rect(effect, color_param, color, x, y + h - b, w, b);
     render_rect(effect, color_param, color, x, y, b, h);
     render_rect(effect, color_param, color, x + w - b, y, b, h);
+}
+
+static void render_segment_bar(vu_meter *m, gs_effect_t *effect,
+                               gs_eparam_t *color_param,
+                               float x, float y, float w, float h,
+                               float db, bool vertical);
+
+/* ---------- 3D chassis / professional hardware helpers (v3.2) ---------- */
+static void render_bevel_panel(gs_effect_t *effect, gs_eparam_t *color_param,
+                               float x, float y, float w, float h,
+                               uint32_t body, uint32_t edge_light,
+                               uint32_t edge_dark, float depth)
+{
+    if (w <= 2.0f * depth || h <= 2.0f * depth)
+        return;
+
+    /* Rear shadow / extrusion. */
+    render_rect(effect, color_param, edge_dark,
+                x + depth, y + depth, w, h);
+    render_rect(effect, color_param, body, x, y, w, h);
+
+    /* Top and left bevels. */
+    render_rect(effect, color_param, edge_light, x, y, w, depth);
+    render_rect(effect, color_param, edge_light, x, y, depth, h);
+
+    /* Bottom and right bevels. */
+    render_rect(effect, color_param, edge_dark,
+                x, y + h - depth, w, depth);
+    render_rect(effect, color_param, edge_dark,
+                x + w - depth, y, depth, h);
+}
+
+static void render_screw(gs_effect_t *effect, gs_eparam_t *color_param,
+                         float cx, float cy, float r)
+{
+    /* Pixel-art concentric screw: self-contained and deterministic. */
+    render_rect(effect, color_param, 0xFF080A0D,
+                cx - r, cy - r, 2.0f * r, 2.0f * r);
+    render_rect(effect, color_param, 0xFF59616A,
+                cx - r + 1.0f, cy - r + 1.0f,
+                std::max(1.0f, 2.0f * r - 2.0f),
+                std::max(1.0f, 2.0f * r - 2.0f));
+    render_rect(effect, color_param, 0xFF171B20,
+                cx - r + 3.0f, cy - 1.0f, 2.0f * r - 6.0f, 2.0f);
+}
+
+static void render_glass_bar(vu_meter *m, gs_effect_t *effect,
+                             gs_eparam_t *color_param,
+                             float x, float y, float w, float h,
+                             float db, bool vertical)
+{
+    /* Deep well. */
+    render_bevel_panel(effect, color_param, x, y, w, h,
+                       0xFF0B0F13, 0xFF303840, 0xFF030405, 3.0f);
+    render_segment_bar(m, effect, color_param,
+                       x + 5.0f, y + 5.0f, w - 10.0f, h - 10.0f,
+                       db, vertical);
+    /* Glass highlight, deliberately subtle. */
+    render_rect(effect, color_param, 0x18FFFFFF,
+                x + 5.0f, y + 5.0f,
+                std::max(1.0f, (w - 10.0f) * 0.10f),
+                h - 10.0f);
 }
 
 static void render_segment_bar(vu_meter *m, gs_effect_t *effect,
@@ -490,108 +553,89 @@ static void draw_centered_text(gs_effect_t *effect, gs_eparam_t *color_param,
               y, scale, color);
 }
 
-static void draw_db_scale(gs_effect_t *effect, gs_eparam_t *color_param,
-                          float x, float y, float h, float min_db,
-                          float max_db, bool vertical, uint32_t text_color)
-{
-    const int marks[] = {0, -3, -6, -9, -12, -15, -18, -21, -24,
-                         -27, -30, -33, -36, -39, -42, -45, -48,
-                         -51, -54, -57, -60};
-    char buf[16];
-    for (int db : marks) {
-        if (db < min_db || db > max_db)
-            continue;
-        const float frac = (float)(db - min_db) / (max_db - min_db);
-        if (vertical) {
-            const float yy = y + (1.0f - frac) * h;
-            render_rect(effect, color_param,
-                        db <= -6 ? 0xFFAA3038 : 0xFF737980,
-                        x + 26.0f, yy, 8.0f, 1.0f);
-            std::snprintf(buf, sizeof(buf), "%d", db);
-            draw_text(effect, color_param, buf, x, yy - 3.0f, 1.0f,
-                      db <= -6 ? 0xFFE34A55 : text_color);
-        } else {
-            const float xx = x + frac * h;
-            render_rect(effect, color_param,
-                        db <= -6 ? 0xFFAA3038 : 0xFF737980,
-                        xx, y, 1.0f, 7.0f);
-            std::snprintf(buf, sizeof(buf), "%d", db);
-            draw_text(effect, color_param, buf, xx - 6.0f, y + 9.0f, 1.0f,
-                      db <= -6 ? 0xFFE34A55 : text_color);
-        }
-    }
-}
-
-static void render_professional_channel(vu_meter *m, gs_effect_t *effect,
-                                         gs_eparam_t *color_param,
-                                         float x, float y, float w, float h,
-                                         float db, float peak, float hold,
-                                         const char *label)
-{
-    const uint32_t frame = style_frame_color(m);
-    render_frame(effect, color_param, frame, x, y, w, h, 2.0f);
-    render_rect(effect, color_param, 0xFF07090B, x + 4.0f, y + 4.0f, w - 8.0f, h - 8.0f);
-
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%s", label);
-    draw_centered_text(effect, color_param, buf, x + w * 0.5f, y - 14.0f, 1.0f, 0xFFE5E7EB);
-    std::snprintf(buf, sizeof(buf), "PEAK %.1f", peak);
-    draw_text(effect, color_param, buf, x + 4.0f, y + 5.0f, 0.75f, 0xFFD1D5DB);
-
-    const float bar_x = x + w * 0.35f;
-    const float bar_w = w * 0.30f;
-    const float bar_y = y + 24.0f;
-    const float bar_h = h - 42.0f;
-    render_rect(effect, color_param, 0xFF12161B, bar_x, bar_y, bar_w, bar_h);
-    render_frame(effect, color_param, 0xFF30363D, bar_x, bar_y, bar_w, bar_h, 1.0f);
-    render_segment_bar(m, effect, color_param, bar_x + 3.0f, bar_y + 3.0f,
-                       bar_w - 6.0f, bar_h - 6.0f, db, true);
-
-    if (m->show_hold)
-        render_peak_segment(m, effect, color_param, bar_x + 3.0f, bar_y + 3.0f,
-                            bar_w - 6.0f, bar_h - 6.0f, hold, true,
-                            m->color_hold);
-    if (m->show_peak)
-        render_peak_segment(m, effect, color_param, bar_x + 3.0f, bar_y + 3.0f,
-                            bar_w - 6.0f, bar_h - 6.0f, peak, true,
-                            m->color_peak);
-
-    draw_db_scale(effect, color_param, x + 1.0f, bar_y, bar_h,
-                  m->min_db, 0.0f, true, 0xFFD1D5DB);
-
-    std::snprintf(buf, sizeof(buf), "RMS %.1f", db);
-    draw_centered_text(effect, color_param, buf, x + w * 0.5f, y + h - 11.0f,
-                       0.8f, 0xFFE5E7EB);
-}
-
 static void render_professional_panel(vu_meter *m, gs_effect_t *effect,
                                        gs_eparam_t *color_param,
                                        float w, float h)
 {
-    render_rect(effect, color_param, 0xFF0A0D11, 0, 0, w, h);
-    render_frame(effect, color_param, style_frame_color(m), 4, 4, w - 8, h - 8, 2.0f);
+    const uint32_t body =
+        m->visual_style == STYLE_WHITE ? 0xFFD7DBDF :
+        m->visual_style == STYLE_RETRO ? 0xFF3A3025 :
+        m->visual_style == STYLE_NEON ? 0xFF101722 : 0xFF20252A;
+    const uint32_t hi =
+        m->visual_style == STYLE_WHITE ? 0xFFF7F8F9 :
+        m->visual_style == STYLE_RETRO ? 0xFFB99B68 : 0xFF59616A;
+    const uint32_t dark =
+        m->visual_style == STYLE_WHITE ? 0xFF7E858C : 0xFF080A0D;
 
-    draw_text(effect, color_param, "PROFESSIONAL", 17, 25, 0.8f, 0xFF6B7280);
+    if (layout_draws_background(m)) {
+        render_bevel_panel(effect, color_param, 2.0f, 2.0f,
+                           w - 4.0f, h - 4.0f, body, hi, dark, 5.0f);
+        render_bevel_panel(effect, color_param, 14.0f, 14.0f,
+                           w - 28.0f, h - 28.0f,
+                           0xFF0A0D10, 0xFF363D44, 0xFF030405, 4.0f);
+    } else {
+        render_frame(effect, color_param, hi, 2.0f, 2.0f, w - 4.0f, h - 4.0f, 2.0f);
+    }
 
-    /* The professional panel intentionally contains only the audio level
-       meters. Balance and Correlation indicators were removed because they
-       were not sufficiently clear/useful in this plugin's presentation. */
-    const float meter_y = 42.0f;
-    const float gap = 18.0f;
+    render_screw(effect, color_param, 25.0f, 25.0f, 6.0f);
+    render_screw(effect, color_param, w - 25.0f, 25.0f, 6.0f);
+    render_screw(effect, color_param, 25.0f, h - 25.0f, 6.0f);
+    render_screw(effect, color_param, w - 25.0f, h - 25.0f, 6.0f);
+
+    draw_text(effect, color_param, "VU METER", 36.0f, 25.0f,
+              1.0f, 0xFFE5E7EB);
+    draw_text(effect, color_param, "LEVEL", w - 74.0f, 25.0f,
+              0.75f, 0xFF7F8A95);
+
+    const float top = 48.0f;
+    const float bottom = h - 38.0f;
+    const float gap = 34.0f;
+    const float cw = (m->meter_mode == METER_SINGLE)
+        ? std::min(180.0f, w - 70.0f)
+        : (w - 70.0f - gap) * 0.5f;
+
+    auto draw_channel = [&](float x, float db, float peak, float hold, const char *label) {
+        render_bevel_panel(effect, color_param, x, top, cw, bottom - top,
+                           0xFF11161B, 0xFF4A525A, 0xFF050608, 3.0f);
+        draw_centered_text(effect, color_param, label,
+                           x + cw * 0.5f, top + 8.0f, 1.0f, 0xFFE7E9EC);
+
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "PEAK %+.1f", peak);
+        draw_centered_text(effect, color_param, buf,
+                           x + cw * 0.5f, top + 21.0f, 0.72f, 0xFFBFC7CF);
+
+        const float bar_w = std::max(24.0f, std::min(58.0f, cw * 0.28f));
+        const float bar_x = x + (cw - bar_w) * 0.5f;
+        const float bar_y = top + 43.0f;
+        const float bar_h = bottom - top - 82.0f;
+        render_glass_bar(m, effect, color_param, bar_x, bar_y,
+                         bar_w, bar_h, db, true);
+
+        if (m->show_hold)
+            render_peak_segment(m, effect, color_param,
+                                bar_x + 5.0f, bar_y + 5.0f,
+                                bar_w - 10.0f, bar_h - 10.0f,
+                                hold, true, m->color_hold);
+        if (m->show_peak)
+            render_peak_segment(m, effect, color_param,
+                                bar_x + 5.0f, bar_y + 5.0f,
+                                bar_w - 10.0f, bar_h - 10.0f,
+                                peak, true, m->color_peak);
+
+        std::snprintf(buf, sizeof(buf), "RMS %+.1f", db);
+        draw_centered_text(effect, color_param, buf,
+                           x + cw * 0.5f, bottom - 25.0f,
+                           0.72f, 0xFFE5E7EB);
+    };
+
     if (m->meter_mode == METER_SINGLE) {
         const int ch = m->mono_channel == 1 ? 1 : 0;
-        render_professional_channel(m, effect, color_param,
-                                    w * 0.5f - 58.0f, meter_y, 116.0f,
-                                    h - meter_y - 24.0f, m->magnitude[ch],
-                                    m->peak[ch], m->hold[ch], ch ? "RIGHT" : "LEFT");
+        draw_channel((w - cw) * 0.5f, m->magnitude[ch],
+                     m->peak[ch], m->hold[ch], ch ? "RIGHT" : "LEFT");
     } else {
-        const float cw = (w - 3.0f * gap) / 2.0f;
-        render_professional_channel(m, effect, color_param, gap, meter_y, cw,
-                                    h - meter_y - 24.0f, m->magnitude[0],
-                                    m->peak[0], m->hold[0], "LEFT");
-        render_professional_channel(m, effect, color_param, 2.0f * gap + cw,
-                                    meter_y, cw, h - meter_y - 24.0f,
-                                    m->magnitude[1], m->peak[1], m->hold[1], "RIGHT");
+        draw_channel(35.0f, m->magnitude[0], m->peak[0], m->hold[0], "LEFT");
+        draw_channel(35.0f + cw + gap, m->magnitude[1], m->peak[1], m->hold[1], "RIGHT");
     }
 }
 
@@ -600,36 +644,52 @@ static void render_analog_professional(vu_meter *m, gs_effect_t *effect,
                                         float x, float y, float w, float h,
                                         float db, const char *label)
 {
-    render_rect(effect, color_param, 0xFF15110C, x, y, w, h);
-    render_frame(effect, color_param, 0xFFB59A64, x, y, w, h, 3.0f);
-    render_rect(effect, color_param, 0xFFDDD0A7, x + 8.0f, y + 8.0f,
-                w - 16.0f, h - 16.0f);
-    draw_centered_text(effect, color_param, label, x + w * 0.5f, y + 12.0f,
-                       1.0f, 0xFF3B3020);
-
-    const float frac = level_to_fraction(db, m->min_db);
-    const float cx = x + w * 0.5f;
-    const float cy = y + h * 0.72f;
-    const float radius = std::min(w, h) * 0.38f;
-    for (int i = 0; i <= 10; ++i) {
-        const float a = -2.55f + (float)i * 2.55f / 10.0f;
-        const float x1 = cx + std::cos(a) * radius;
-        const float y1 = cy + std::sin(a) * radius;
-        const float x2 = cx + std::cos(a) * (radius - 8.0f);
-        const float y2 = cy + std::sin(a) * (radius - 8.0f);
-        render_rect(effect, color_param, 0xFF4A3C29,
-                    std::min(x1, x2), std::min(y1, y2),
-                    std::max(1.0f, std::abs(x2 - x1) + 1.0f),
-                    std::max(1.0f, std::abs(y2 - y1) + 1.0f));
+    if (layout_draws_background(m)) {
+        render_bevel_panel(effect, color_param, x, y, w, h,
+                           0xFF29241D, 0xFF7C6C54, 0xFF090806, 5.0f);
+        render_bevel_panel(effect, color_param, x + 7.0f, y + 7.0f,
+                           w - 14.0f, h - 14.0f,
+                           0xFFD9CEA8, 0xFFF3E9C7, 0xFF756C54, 3.0f);
+    } else {
+        render_frame(effect, color_param, 0xFFD0C090, x, y, w, h, 2.0f);
     }
+    draw_centered_text(effect, color_param, label,
+                       x + w * 0.5f, y + 11.0f, 1.0f, 0xFF2E281D);
+
+    const float cx = x + w * 0.5f;
+    const float cy = y + h * 0.67f;
+    const float radius = std::min(w, h) * 0.40f;
+    const float frac = level_to_fraction(db, m->min_db);
+
+    /* Dial ticks. */
+    for (int i = 0; i <= 20; ++i) {
+        const float a = -2.55f + (float)i * 2.55f / 20.0f;
+        const float r1 = radius;
+        const float r2 = radius - ((i % 2 == 0) ? 11.0f : 7.0f);
+        const float x1 = cx + std::cos(a) * r1;
+        const float y1 = cy + std::sin(a) * r1;
+        const float x2 = cx + std::cos(a) * r2;
+        const float y2 = cy + std::sin(a) * r2;
+        render_rect(effect, color_param, i >= 16 ? 0xFF9A3036 : 0xFF4B402F,
+                    std::min(x1, x2), std::min(y1, y2),
+                    std::max(1.0f, std::abs(x2 - x1) + 1.5f),
+                    std::max(1.0f, std::abs(y2 - y1) + 1.5f));
+    }
+
     const float angle = -2.55f + frac * 2.55f;
-    const float nx = cx + std::cos(angle) * (radius - 16.0f);
-    const float ny = cy + std::sin(angle) * (radius - 16.0f);
-    const float minx = std::min(cx, nx), miny = std::min(cy, ny);
-    render_rect(effect, color_param, 0xFF2D2520, minx, miny,
+    const float nx = cx + std::cos(angle) * (radius - 15.0f);
+    const float ny = cy + std::sin(angle) * (radius - 15.0f);
+    render_rect(effect, color_param, 0xFF5C161A,
+                std::min(cx, nx), std::min(cy, ny),
                 std::max(2.0f, std::abs(nx - cx) + 2.0f),
                 std::max(2.0f, std::abs(ny - cy) + 2.0f));
-    draw_centered_text(effect, color_param, "VU", cx, y + h - 18.0f, 0.9f, 0xFF3B3020);
+    render_rect(effect, color_param, 0xFF1C1710,
+                cx - 5.0f, cy - 5.0f, 10.0f, 10.0f);
+
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%+.1f dB", db);
+    draw_centered_text(effect, color_param, buf,
+                       cx, y + h - 19.0f, 0.8f, 0xFF2E281D);
 }
 
 static void render_layout(vu_meter *m, gs_effect_t *effect,
@@ -681,13 +741,13 @@ static void render_layout(vu_meter *m, gs_effect_t *effect,
         /* The original v2.x LED renderer remains available as the compatibility
            layout. This is intentionally not reused by the Professional Panel. */
         if (m->layout == LAYOUT_VERTICAL_LED) {
-            render_stereo_vertical(m, effect, color_param, 0, 0, w, h, false, true);
+            render_stereo_vertical(m, effect, color_param, 0, 0, w, h, true, true);
         } else if (m->layout == LAYOUT_SINGLE || m->layout == LAYOUT_SINGLE_SLIM) {
             render_stereo_horizontal(m, effect, color_param, 0, 0, w, h,
                                      true, m->layout == LAYOUT_SINGLE_SLIM);
         } else {
             render_stereo_horizontal(m, effect, color_param, 0, 0, w, h,
-                                     m->layout == LAYOUT_SLIM_LED, m->layout == LAYOUT_SLIM_LED);
+                                     true, m->layout == LAYOUT_SLIM_LED);
         }
         break;
     }

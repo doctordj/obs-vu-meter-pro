@@ -6,7 +6,7 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-vu-meter-pro", "en-US")
 
 MODULE_EXPORT const char *obs_module_description(void)
 {
-    return "Professional VU meter source for OBS Studio.";
+    return "Professional VU meter source for OBS Studio with modular hardware-style layouts.";
 }
 
 bool obs_module_load(void)
