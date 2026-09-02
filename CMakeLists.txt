@@ -1,40 +1,45 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
+project(obs-vu-meter-pro VERSION 3.2.0 LANGUAGES C CXX)
 
-project(${_name} VERSION ${_version})
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" OFF)
-option(ENABLE_QT "Use Qt functionality" OFF)
-
-include(compilerconfig)
-include(defaults)
-include(helpers)
-
-add_library(${CMAKE_PROJECT_NAME} MODULE)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" OPTIONAL)
 
 find_package(libobs REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
+find_package(obs-frontend-api REQUIRED)
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+add_library(obs-vu-meter-pro MODULE
     src/plugin-main.cpp
     src/vu-meter-source.cpp
-    src/vu-meter-source.hpp
 )
 
-set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
-
-if(MSVC)
-    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE /W4 /permissive- /std:c++20)
-endif()
-
-target_compile_features(${CMAKE_PROJECT_NAME} PRIVATE cxx_std_20)
-
-target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    PLUGIN_VERSION="${PROJECT_VERSION}"
+target_include_directories(obs-vu-meter-pro PRIVATE
+    ${LIBOBS_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-# OBS plugin locale/data files.
-install(DIRECTORY data/
-    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/obs/obs-plugins/${_name}"
+target_link_libraries(obs-vu-meter-pro PRIVATE
+    OBS::libobs
+)
+
+target_compile_definitions(obs-vu-meter-pro PRIVATE
+    PLUGIN_VERSION="3.2.0"
+)
+
+set_target_properties(obs-vu-meter-pro PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "obs-vu-meter-pro"
+)
+
+install(TARGETS obs-vu-meter-pro
+    LIBRARY DESTINATION obs-plugins/64bit
+    RUNTIME DESTINATION obs-plugins/64bit
+)
+
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vu-meter-source.hpp
+    DESTINATION include/obs-vu-meter-pro
 )
