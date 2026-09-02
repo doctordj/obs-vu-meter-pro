@@ -1,5 +1,7 @@
 #include "vu-meter-source.hpp"
 
+/* OBS VU Meter PRO 3.3 - visual refinement build. */
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -577,87 +579,125 @@ static void render_professional_panel(vu_meter *m, gs_effect_t *effect,
                                        gs_eparam_t *color_param,
                                        float w, float h)
 {
-    const uint32_t body =
-        m->visual_style == STYLE_WHITE ? 0xFFD7DBDF :
-        m->visual_style == STYLE_RETRO ? 0xFF3A3025 :
-        m->visual_style == STYLE_NEON ? 0xFF101722 : 0xFF20252A;
-    const uint32_t hi =
-        m->visual_style == STYLE_WHITE ? 0xFFF7F8F9 :
-        m->visual_style == STYLE_RETRO ? 0xFFB99B68 : 0xFF59616A;
-    const uint32_t dark =
-        m->visual_style == STYLE_WHITE ? 0xFF7E858C : 0xFF080A0D;
+    /* v3.3: layered hardware chassis.  The audio path is untouched; this
+       renderer only changes presentation. */
+    uint32_t body = 0xFF20262C;
+    uint32_t hi = 0xFF69727C;
+    uint32_t dark = 0xFF07090B;
+    uint32_t face = 0xFF11161B;
+    uint32_t accent = 0xFF35E06F;
 
-    if (layout_draws_background(m)) {
-        render_bevel_panel(effect, color_param, 2.0f, 2.0f,
-                           w - 4.0f, h - 4.0f, body, hi, dark, 5.0f);
-        render_bevel_panel(effect, color_param, 14.0f, 14.0f,
-                           w - 28.0f, h - 28.0f,
-                           0xFF0A0D10, 0xFF363D44, 0xFF030405, 4.0f);
-    } else {
-        render_frame(effect, color_param, hi, 2.0f, 2.0f, w - 4.0f, h - 4.0f, 2.0f);
+    switch (m->visual_style) {
+    case STYLE_WHITE:
+        body = 0xFFD5D9DD; hi = 0xFFF7F8F9; dark = 0xFF777D83; face = 0xFFEEF0F2;
+        break;
+    case STYLE_RETRO:
+        body = 0xFF463A2A; hi = 0xFFC2A66F; dark = 0xFF17120C; face = 0xFF211A12;
+        accent = 0xFFE0B85A;
+        break;
+    case STYLE_NEON:
+        body = 0xFF111A22; hi = 0xFF00D9FF; dark = 0xFF030609; face = 0xFF071018;
+        accent = 0xFF00D9FF;
+        break;
+    case STYLE_ANALOG:
+        body = 0xFF403A31; hi = 0xFFB6A27E; dark = 0xFF110F0B; face = 0xFF211D17;
+        accent = 0xFFD6B56A;
+        break;
+    case STYLE_DARK:
+        body = 0xFF15191E; hi = 0xFF424A53; dark = 0xFF020304; face = 0xFF090D11;
+        break;
+    case STYLE_MINIMAL:
+        body = 0xFF2B3036; hi = 0xFF8B939C; dark = 0xFF111418; face = 0xFF171B20;
+        break;
+    default:
+        break;
     }
 
+    if (layout_draws_background(m)) {
+        /* Extruded chassis + front plate + recessed inner plate. */
+        render_bevel_panel(effect, color_param, 3.0f, 4.0f, w - 6.0f, h - 6.0f,
+                           dark, dark, 0xFF020304, 6.0f);
+        render_bevel_panel(effect, color_param, 0.0f, 0.0f, w - 7.0f, h - 7.0f,
+                           body, hi, dark, 5.0f);
+        render_bevel_panel(effect, color_param, 14.0f, 15.0f, w - 35.0f, h - 35.0f,
+                           face, 0xFF3D464F, 0xFF050608, 4.0f);
+    } else {
+        render_frame(effect, color_param, hi, 2.0f, 2.0f, w - 4.0f, h - 4.0f, 2.0f);
+        render_frame(effect, color_param, 0xFF303840, 9.0f, 9.0f, w - 18.0f, h - 18.0f, 1.0f);
+    }
+
+    /* Realistic mounting screws. */
     render_screw(effect, color_param, 25.0f, 25.0f, 6.0f);
     render_screw(effect, color_param, w - 25.0f, 25.0f, 6.0f);
     render_screw(effect, color_param, 25.0f, h - 25.0f, 6.0f);
     render_screw(effect, color_param, w - 25.0f, h - 25.0f, 6.0f);
 
-    draw_text(effect, color_param, "VU METER", 36.0f, 25.0f,
-              1.0f, 0xFFE5E7EB);
-    draw_text(effect, color_param, "LEVEL", w - 74.0f, 25.0f,
-              0.75f, 0xFF7F8A95);
+    /* Header strip and status LEDs. */
+    render_bevel_panel(effect, color_param, 34.0f, 30.0f, w - 68.0f, 25.0f,
+                       0xFF0A0E12, 0xFF343C44, 0xFF030405, 2.0f);
+    draw_text(effect, color_param, "VU METER", 47.0f, 36.0f, 0.95f, 0xFFE8EBEE);
+    draw_text(effect, color_param, "STUDIO", w - 103.0f, 37.0f, 0.65f, 0xFF89939D);
+    render_rect(effect, color_param, accent, w - 54.0f, 38.0f, 7.0f, 7.0f);
 
-    const float top = 48.0f;
-    const float bottom = h - 38.0f;
-    const float gap = 34.0f;
-    const float cw = (m->meter_mode == METER_SINGLE)
-        ? std::min(180.0f, w - 70.0f)
-        : (w - 70.0f - gap) * 0.5f;
+    const float top = 69.0f;
+    const float bottom = h - 48.0f;
+    const float gap = 24.0f;
+    const float left = 34.0f;
+    const float usable = w - 2.0f * left - gap;
+    const float cw = (m->meter_mode == METER_SINGLE) ? std::min(220.0f, usable) : usable * 0.5f;
 
     auto draw_channel = [&](float x, float db, float peak, float hold, const char *label) {
-        render_bevel_panel(effect, color_param, x, top, cw, bottom - top,
-                           0xFF11161B, 0xFF4A525A, 0xFF050608, 3.0f);
-        draw_centered_text(effect, color_param, label,
-                           x + cw * 0.5f, top + 8.0f, 1.0f, 0xFFE7E9EC);
+        const float ph = bottom - top;
+        render_bevel_panel(effect, color_param, x, top, cw, ph,
+                           0xFF0D1217, 0xFF4A545E, 0xFF030405, 3.0f);
+        render_bevel_panel(effect, color_param, x + 8.0f, top + 8.0f, cw - 16.0f, ph - 16.0f,
+                           0xFF070B0F, 0xFF252D35, 0xFF020304, 2.0f);
 
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "PEAK %+.1f", peak);
-        draw_centered_text(effect, color_param, buf,
-                           x + cw * 0.5f, top + 21.0f, 0.72f, 0xFFBFC7CF);
+        draw_centered_text(effect, color_param, label, x + cw * 0.5f, top + 16.0f,
+                           0.95f, 0xFFE5E9ED);
 
-        const float bar_w = std::max(24.0f, std::min(58.0f, cw * 0.28f));
+        /* Meter well is deliberately narrower and deeper, like a rack unit. */
+        const float bar_w = std::max(30.0f, std::min(62.0f, cw * 0.24f));
         const float bar_x = x + (cw - bar_w) * 0.5f;
-        const float bar_y = top + 43.0f;
-        const float bar_h = bottom - top - 82.0f;
-        render_glass_bar(m, effect, color_param, bar_x, bar_y,
-                         bar_w, bar_h, db, true);
+        const float bar_y = top + 48.0f;
+        const float bar_h = ph - 93.0f;
+        render_glass_bar(m, effect, color_param, bar_x, bar_y, bar_w, bar_h, db, true);
 
         if (m->show_hold)
-            render_peak_segment(m, effect, color_param,
-                                bar_x + 5.0f, bar_y + 5.0f,
-                                bar_w - 10.0f, bar_h - 10.0f,
-                                hold, true, m->color_hold);
+            render_peak_segment(m, effect, color_param, bar_x + 5.0f, bar_y + 5.0f,
+                                bar_w - 10.0f, bar_h - 10.0f, hold, true, m->color_hold);
         if (m->show_peak)
-            render_peak_segment(m, effect, color_param,
-                                bar_x + 5.0f, bar_y + 5.0f,
-                                bar_w - 10.0f, bar_h - 10.0f,
-                                peak, true, m->color_peak);
+            render_peak_segment(m, effect, color_param, bar_x + 5.0f, bar_y + 5.0f,
+                                bar_w - 10.0f, bar_h - 10.0f, peak, true, m->color_peak);
 
-        std::snprintf(buf, sizeof(buf), "RMS %+.1f", db);
-        draw_centered_text(effect, color_param, buf,
-                           x + cw * 0.5f, bottom - 25.0f,
-                           0.72f, 0xFFE5E7EB);
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "%+.1f dB", db);
+        draw_centered_text(effect, color_param, buf, x + cw * 0.5f, bottom - 34.0f,
+                           0.85f, 0xFFD5DADF);
+        std::snprintf(buf, sizeof(buf), "PEAK %+.1f", peak);
+        draw_centered_text(effect, color_param, buf, x + cw * 0.5f, bottom - 19.0f,
+                           0.62f, 0xFF8F9AA5);
+
+        /* Small physical indicator lamps. */
+        render_rect(effect, color_param, segment_color(m, db), x + 14.0f, bottom - 22.0f, 5.0f, 5.0f);
+        render_rect(effect, color_param, 0xFF252B31, x + 23.0f, bottom - 22.0f, 5.0f, 5.0f);
     };
 
     if (m->meter_mode == METER_SINGLE) {
         const int ch = m->mono_channel == 1 ? 1 : 0;
-        draw_channel((w - cw) * 0.5f, m->magnitude[ch],
-                     m->peak[ch], m->hold[ch], ch ? "RIGHT" : "LEFT");
+        draw_channel((w - cw) * 0.5f, m->magnitude[ch], m->peak[ch], m->hold[ch],
+                     ch ? "RIGHT" : "LEFT");
     } else {
-        draw_channel(35.0f, m->magnitude[0], m->peak[0], m->hold[0], "LEFT");
-        draw_channel(35.0f + cw + gap, m->magnitude[1], m->peak[1], m->hold[1], "RIGHT");
+        draw_channel(left, m->magnitude[0], m->peak[0], m->hold[0], "LEFT");
+        draw_channel(left + cw + gap, m->magnitude[1], m->peak[1], m->hold[1], "RIGHT");
     }
+
+    /* Bottom status rail. */
+    render_rect(effect, color_param, 0xFF080B0E, 34.0f, h - 35.0f, w - 68.0f, 12.0f);
+    draw_text(effect, color_param, "LEVEL", 42.0f, h - 31.0f, 0.58f, 0xFF77818B);
+    draw_text(effect, color_param, "dBFS", w - 75.0f, h - 31.0f, 0.58f, 0xFF77818B);
 }
+
 
 static void render_analog_professional(vu_meter *m, gs_effect_t *effect,
                                         gs_eparam_t *color_param,
@@ -965,16 +1005,16 @@ static obs_properties_t *vu_properties(void *)
     obs_property_t *layout =
         obs_properties_add_list(props, "layout", "Layout",
                                 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(layout, "1. Básico (LED) — compatível com v2.x", LAYOUT_BASIC);
-    obs_property_list_add_int(layout, "2. Painel Profissional", LAYOUT_PRO_PANEL);
-    obs_property_list_add_int(layout, "3. Slim LED", LAYOUT_SLIM_LED);
-    obs_property_list_add_int(layout, "4. Clássico Analógico", LAYOUT_ANALOG);
-    obs_property_list_add_int(layout, "5. Escala Dupla", LAYOUT_DOUBLE_SCALE);
-    obs_property_list_add_int(layout, "6. Barra Única", LAYOUT_SINGLE);
-    obs_property_list_add_int(layout, "7. Barra Única Slim", LAYOUT_SINGLE_SLIM);
-    obs_property_list_add_int(layout, "8. Painel Vertical", LAYOUT_VERTICAL_PANEL);
-    obs_property_list_add_int(layout, "9. LED Vertical", LAYOUT_VERTICAL_LED);
-    obs_property_list_add_int(layout, "10. Analógico Vertical", LAYOUT_ANALOG_VERTICAL);
+    obs_property_list_add_int(layout, "1. Classic LED (base)", LAYOUT_BASIC);
+    obs_property_list_add_int(layout, "2. Console 3D", LAYOUT_PRO_PANEL);
+    obs_property_list_add_int(layout, "3. Slim LED 3D", LAYOUT_SLIM_LED);
+    obs_property_list_add_int(layout, "4. Vintage Analog", LAYOUT_ANALOG);
+    obs_property_list_add_int(layout, "5. Dual Scale Rack", LAYOUT_DOUBLE_SCALE);
+    obs_property_list_add_int(layout, "6. Single Meter 3D", LAYOUT_SINGLE);
+    obs_property_list_add_int(layout, "7. Single Slim 3D", LAYOUT_SINGLE_SLIM);
+    obs_property_list_add_int(layout, "8. Vertical Console 3D", LAYOUT_VERTICAL_PANEL);
+    obs_property_list_add_int(layout, "9. Vertical LED 3D", LAYOUT_VERTICAL_LED);
+    obs_property_list_add_int(layout, "10. Vintage Analog Vertical", LAYOUT_ANALOG_VERTICAL);
 
     obs_property_t *mode =
         obs_properties_add_list(props, "meter_mode", "Modo do medidor",
@@ -993,14 +1033,14 @@ static obs_properties_t *vu_properties(void *)
     obs_property_t *style =
         obs_properties_add_list(props, "visual_style", "Estilo visual",
                                 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(style, "Profissional (Painel)", STYLE_PRO);
+    obs_property_list_add_int(style, "Chassi Grafite", STYLE_PRO);
     obs_property_list_add_int(style, "LED Moderno", STYLE_LED);
-    obs_property_list_add_int(style, "Clássico Analógico", STYLE_ANALOG);
+    obs_property_list_add_int(style, "Painel Analógico", STYLE_ANALOG);
     obs_property_list_add_int(style, "Minimalista", STYLE_MINIMAL);
-    obs_property_list_add_int(style, "Neon Glow", STYLE_NEON);
-    obs_property_list_add_int(style, "Branco (Claro)", STYLE_WHITE);
-    obs_property_list_add_int(style, "Dark Premium", STYLE_DARK);
-    obs_property_list_add_int(style, "Retro Vintage", STYLE_RETRO);
+    obs_property_list_add_int(style, "Neon / Cyan", STYLE_NEON);
+    obs_property_list_add_int(style, "Console Prata", STYLE_WHITE);
+    obs_property_list_add_int(style, "Dark Rack", STYLE_DARK);
+    obs_property_list_add_int(style, "Vintage", STYLE_RETRO);
 
     obs_property_t *bg =
         obs_properties_add_list(props, "background_mode", "Fundo / Chroma Key",
