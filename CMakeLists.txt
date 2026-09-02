@@ -4,6 +4,11 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCO
 
 project(${_name} VERSION ${_version})
 
+# The source uses C++20 aggregate/designated initialization supported by MSVC 2022.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" OFF)
 option(ENABLE_QT "Use Qt functionality" OFF)
 
