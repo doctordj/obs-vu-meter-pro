@@ -18,6 +18,14 @@ include(helpers)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
+# OBS 31.x builds this plugin with a preconfigured C++ standard.
+# Explicitly require C++20 on the target because the source_info declaration
+# uses C++20 designated initializers.
+target_compile_features(${CMAKE_PROJECT_NAME} PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE /std:c++20)
+endif()
+
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 
