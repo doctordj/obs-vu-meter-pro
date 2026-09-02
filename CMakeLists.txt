@@ -47,3 +47,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+
+
+# Runtime artwork used by the professional hardware-style layouts.
+# OBS associates module data with data/obs-plugins/<plugin-name>.
+install(DIRECTORY data/
+    DESTINATION data/obs-plugins/${_name}
+)

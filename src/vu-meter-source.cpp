@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <string>
+#include <graphics/image-file.h>
 
 namespace {
 
@@ -89,6 +91,12 @@ struct vu_meter {
     uint32_t color_hold = 0xFF00FFFF;
     uint32_t color_frame = 0xFF353B43;
     bool preserve_chroma = true;
+
+    // High-quality photographic/procedural panel backgrounds.
+    std::string background_file;
+    std::string background_loaded_file;
+    gs_image_file_t background_image{};
+    bool background_initialized = false;
 };
 
 static const char *vu_name(void *)
@@ -235,93 +243,6 @@ static void render_rect(gs_effect_t *effect, gs_eparam_t *color_param,
     while (gs_effect_loop(effect, "Solid"))
         gs_draw_quadf(nullptr, 0, w, h);
     gs_matrix_pop();
-}
-
-static void render_circle(gs_effect_t *effect, gs_eparam_t *color_param,
-                           uint32_t color, float cx, float cy, float radius)
-{
-    if (radius <= 1.0f)
-        return;
-    /* A filled circle made from horizontal scanlines. This avoids relying on
-       platform-specific vector primitives and renders consistently in OBS. */
-    const int r = (int)std::ceil(radius);
-    for (int iy = -r; iy <= r; ++iy) {
-        const float yy = (float)iy;
-        const float inside = radius * radius - yy * yy;
-        if (inside < 0.0f)
-            continue;
-        const float half = std::sqrt(inside);
-        render_rect(effect, color_param, color,
-                    cx - half, cy + yy, std::max(1.0f, half * 2.0f), 1.2f);
-    }
-}
-
-static void render_ring(gs_effect_t *effect, gs_eparam_t *color_param,
-                        uint32_t color, float cx, float cy,
-                        float outer, float inner)
-{
-    if (outer <= inner || inner < 0.0f)
-        return;
-    const int r = (int)std::ceil(outer);
-    const float outer2 = outer * outer;
-    const float inner2 = inner * inner;
-    for (int iy = -r; iy <= r; ++iy) {
-        const float yy = (float)iy;
-        const float oy = outer2 - yy * yy;
-        if (oy <= 0.0f)
-            continue;
-        const float half_outer = std::sqrt(oy);
-        const float iy2 = yy * yy;
-        const float half_inner = inner2 > iy2 ? std::sqrt(inner2 - iy2) : 0.0f;
-        if (half_outer > half_inner) {
-            render_rect(effect, color_param, color,
-                        cx - half_outer, cy + yy,
-                        std::max(1.0f, half_outer - half_inner), 1.2f);
-            if (half_inner > 0.0f)
-                render_rect(effect, color_param, color,
-                            cx + half_inner, cy + yy,
-                            std::max(1.0f, half_outer - half_inner), 1.2f);
-        }
-    }
-}
-
-static void render_dial_tick(gs_effect_t *effect, gs_eparam_t *color_param,
-                             uint32_t color, float cx, float cy,
-                             float angle, float r1, float r2, float width)
-{
-    /* Build a short angled tick from tiny overlapping rectangles. */
-    const float c = std::cos(angle);
-    const float s = std::sin(angle);
-    const int steps = std::max(2, (int)std::ceil(std::abs(r2 - r1) / 2.0f));
-    for (int i = 0; i <= steps; ++i) {
-        const float t = (float)i / (float)steps;
-        const float r = r1 + (r2 - r1) * t;
-        const float px = cx + c * r;
-        const float py = cy + s * r;
-        render_rect(effect, color_param, color,
-                    px - width * 0.5f, py - width * 0.5f,
-                    width, width);
-    }
-}
-
-static void render_needle(gs_effect_t *effect,
-                          gs_eparam_t *color_param, float cx, float cy,
-                          float angle, float length, uint32_t color)
-{
-    const float c = std::cos(angle);
-    const float s = std::sin(angle);
-    const int steps = std::max(4, (int)std::ceil(length / 2.0f));
-    for (int i = 0; i <= steps; ++i) {
-        const float t = (float)i / (float)steps;
-        const float r = length * t;
-        const float px = cx + c * r;
-        const float py = cy + s * r;
-        const float ww = (i < 2) ? 3.0f : 2.0f;
-        render_rect(effect, color_param, color,
-                    px - ww * 0.5f, py - ww * 0.5f, ww, ww);
-    }
-    render_circle(effect, color_param, 0xFF151515, cx, cy, 7.0f);
-    render_ring(effect, color_param, 0xFFC8C8C8, cx, cy, 7.0f, 5.0f);
 }
 
 static void render_frame(gs_effect_t *effect, gs_eparam_t *color_param,
@@ -642,6 +563,97 @@ static void draw_centered_text(gs_effect_t *effect, gs_eparam_t *color_param,
               y, scale, color);
 }
 
+static const char *background_filename_for_style(int style)
+{
+    switch (style) {
+    case STYLE_LED:     return "backgrounds/modern_led.png";
+    case STYLE_ANALOG:  return "backgrounds/vintage_analog.png";
+    case STYLE_MINIMAL: return "backgrounds/minimal_dark.png";
+    case STYLE_NEON:    return "backgrounds/neon_cyan.png";
+    case STYLE_WHITE:   return "backgrounds/silver_console.png";
+    case STYLE_DARK:    return "backgrounds/dark_rack.png";
+    case STYLE_RETRO:   return "backgrounds/retro_amber.png";
+    case STYLE_PRO:
+    default:            return "backgrounds/modern_console.png";
+    }
+}
+
+static void set_background_file(vu_meter *m)
+{
+    if (!m)
+        return;
+
+    if (m->background_mode == BG_TRANSPARENT ||
+        m->background_mode == BG_CHROMA_GREEN ||
+        m->background_mode == BG_CHROMA_BLUE) {
+        m->background_file.clear();
+        return;
+    }
+
+    const char *relative = background_filename_for_style(m->visual_style);
+    char *path = obs_module_file(relative);
+    if (!path) {
+        m->background_file.clear();
+        return;
+    }
+
+    m->background_file = path;
+    bfree(path);
+}
+
+static void ensure_background_texture(vu_meter *m)
+{
+    if (!m || m->background_file.empty())
+        return;
+
+    if (m->background_initialized &&
+        m->background_loaded_file == m->background_file)
+        return;
+
+    if (m->background_initialized) {
+        gs_image_file_free(&m->background_image);
+        m->background_initialized = false;
+        m->background_loaded_file.clear();
+    }
+
+    gs_image_file_init(&m->background_image, m->background_file.c_str());
+    gs_image_file_init_texture(&m->background_image);
+    m->background_initialized = m->background_image.texture != nullptr;
+    if (m->background_initialized)
+        m->background_loaded_file = m->background_file;
+}
+
+static void render_image_background(vu_meter *m, gs_effect_t *effect,
+                                    float w, float h)
+{
+    if (!m || !effect || m->background_file.empty())
+        return;
+
+    ensure_background_texture(m);
+    if (!m->background_initialized || !m->background_image.texture)
+        return;
+
+    gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
+    if (!image)
+        return;
+
+    gs_effect_set_texture_srgb(image, m->background_image.texture);
+    while (gs_effect_loop(effect, "Draw"))
+        gs_draw_sprite(m->background_image.texture, 0,
+                       (uint32_t)w, (uint32_t)h);
+}
+
+static void render_background_overlay(gs_effect_t *effect,
+                                      gs_eparam_t *color_param,
+                                      float w, float h)
+{
+    // A translucent black overlay pushes the meters forward and makes the
+    // background behave like a real recessed hardware faceplate.
+    render_rect(effect, color_param, 0x7803080C, 0.0f, 0.0f, w, h);
+    render_rect(effect, color_param, 0x2200BFFF, 0.0f, 0.0f, w, 3.0f);
+    render_rect(effect, color_param, 0x22000000, 0.0f, h - 3.0f, w, 3.0f);
+}
+
 static bool layout_draws_background(const vu_meter *m)
 {
     if (!m)
@@ -791,86 +803,52 @@ static void render_analog_professional(vu_meter *m, gs_effect_t *effect,
                                         float x, float y, float w, float h,
                                         float db, const char *label)
 {
-    /* A true hardware-style analog meter: textured chassis, recessed cream
-       dial, circular scale, major/minor ticks, red zone, needle and hub. */
-    render_bevel_panel(effect, color_param, x, y, w, h,
-                       0xFF25282B, 0xFF777D82, 0xFF070809, 6.0f);
-    render_bevel_panel(effect, color_param, x + 7.0f, y + 7.0f,
-                       w - 14.0f, h - 14.0f,
-                       0xFF4A4C4C, 0xFF9A9D9C, 0xFF171818, 4.0f);
-
-    const float ix = x + 16.0f;
-    const float iy = y + 16.0f;
-    const float iw = std::max(20.0f, w - 32.0f);
-    const float ih = std::max(20.0f, h - 32.0f);
-    render_bevel_panel(effect, color_param, ix, iy, iw, ih,
-                       0xFFD8CCAA, 0xFFF7EBC5, 0xFF655B48, 3.0f);
+    if (layout_draws_background(m)) {
+        render_bevel_panel(effect, color_param, x, y, w, h,
+                           0xFF29241D, 0xFF7C6C54, 0xFF090806, 5.0f);
+        render_bevel_panel(effect, color_param, x + 7.0f, y + 7.0f,
+                           w - 14.0f, h - 14.0f,
+                           0xFFD9CEA8, 0xFFF3E9C7, 0xFF756C54, 3.0f);
+    } else {
+        render_frame(effect, color_param, 0xFFD0C090, x, y, w, h, 2.0f);
+    }
+    draw_centered_text(effect, color_param, label,
+                       x + w * 0.5f, y + 11.0f, 1.0f, 0xFF2E281D);
 
     const float cx = x + w * 0.5f;
-    const float cy = y + h * 0.70f;
-    const float radius = std::max(20.0f, std::min(w * 0.43f, h * 0.49f));
-
-    /* Dial face with subtle concentric depth. */
-    render_circle(effect, color_param, 0xFFB8AC8E, cx + 2.0f, cy + 2.0f, radius + 2.0f);
-    render_circle(effect, color_param, 0xFFE8DDBA, cx, cy, radius);
-    render_ring(effect, color_param, 0xFF8B8068, cx, cy, radius, radius - 2.0f);
-    render_ring(effect, color_param, 0xFFF5EBCB, cx, cy, radius - 4.0f, radius - 5.0f);
-
-    draw_centered_text(effect, color_param, label, cx, y + 28.0f,
-                       1.15f, 0xFF211D16);
-    draw_centered_text(effect, color_param, "VU", cx, y + 45.0f,
-                       0.72f, 0xFF756A54);
-
-    /* Scale: -60 to 0 dB, with a clear red overload region. */
-    const float start_angle = -2.52f;
-    const float end_angle = -0.62f;
-    for (int i = 0; i <= 30; ++i) {
-        const float a = start_angle + (end_angle - start_angle) *
-                        ((float)i / 30.0f);
-        const bool major = (i % 5 == 0);
-        const bool red = i >= 25;
-        render_dial_tick(effect, color_param,
-                         red ? 0xFFB32027 : 0xFF332D23,
-                         cx, cy, a,
-                         radius - 9.0f,
-                         radius - (major ? 27.0f : 20.0f),
-                         major ? 3.0f : 2.0f);
-    }
-
-    /* Numeric scale labels. */
-    const char *labels[] = {"-60", "-40", "-20", "-10", "-5", "0"};
-    for (int i = 0; i < 6; ++i) {
-        const float a = start_angle + (end_angle - start_angle) *
-                        ((float)i / 5.0f);
-        const float lr = radius - 42.0f;
-        draw_centered_text(effect, color_param, labels[i],
-                           cx + std::cos(a) * lr,
-                           cy + std::sin(a) * lr - 4.0f,
-                           0.62f,
-                           (i >= 4) ? 0xFF9C242A : 0xFF433A2B);
-    }
-
-    /* Red overload arc made from small illuminated marks. */
-    for (int i = 25; i <= 30; ++i) {
-        const float a = start_angle + (end_angle - start_angle) *
-                        ((float)i / 30.0f);
-        render_dial_tick(effect, color_param, 0xFFD83A40,
-                         cx, cy, a, radius - 12.0f, radius - 7.0f, 3.0f);
-    }
-
+    const float cy = y + h * 0.67f;
+    const float radius = std::min(w, h) * 0.40f;
     const float frac = level_to_fraction(db, m->min_db);
-    const float angle = start_angle + frac * (end_angle - start_angle);
-    render_needle(effect, color_param, cx, cy, angle,
-                  radius - 18.0f, 0xFF9D2027);
 
-    /* Mechanical scale plate and readout. */
-    render_bevel_panel(effect, color_param,
-                       cx - 43.0f, y + h - 38.0f, 86.0f, 20.0f,
-                       0xFF2A2721, 0xFF716A5B, 0xFF11100D, 2.0f);
+    /* Dial ticks. */
+    for (int i = 0; i <= 20; ++i) {
+        const float a = -2.55f + (float)i * 2.55f / 20.0f;
+        const float r1 = radius;
+        const float r2 = radius - ((i % 2 == 0) ? 11.0f : 7.0f);
+        const float x1 = cx + std::cos(a) * r1;
+        const float y1 = cy + std::sin(a) * r1;
+        const float x2 = cx + std::cos(a) * r2;
+        const float y2 = cy + std::sin(a) * r2;
+        render_rect(effect, color_param, i >= 16 ? 0xFF9A3036 : 0xFF4B402F,
+                    std::min(x1, x2), std::min(y1, y2),
+                    std::max(1.0f, std::abs(x2 - x1) + 1.5f),
+                    std::max(1.0f, std::abs(y2 - y1) + 1.5f));
+    }
+
+    const float angle = -2.55f + frac * 2.55f;
+    const float nx = cx + std::cos(angle) * (radius - 15.0f);
+    const float ny = cy + std::sin(angle) * (radius - 15.0f);
+    render_rect(effect, color_param, 0xFF5C161A,
+                std::min(cx, nx), std::min(cy, ny),
+                std::max(2.0f, std::abs(nx - cx) + 2.0f),
+                std::max(2.0f, std::abs(ny - cy) + 2.0f));
+    render_rect(effect, color_param, 0xFF1C1710,
+                cx - 5.0f, cy - 5.0f, 10.0f, 10.0f);
+
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%+.1f dB", db);
-    draw_centered_text(effect, color_param, buf, cx, y + h - 33.0f,
-                       0.68f, 0xFFF0E5C5);
+    draw_centered_text(effect, color_param, buf,
+                       cx, y + h - 19.0f, 0.8f, 0xFF2E281D);
 }
 
 static void render_layout(vu_meter *m, gs_effect_t *effect,
@@ -922,13 +900,14 @@ static void render_layout(vu_meter *m, gs_effect_t *effect,
         /* The original v2.x LED renderer remains available as the compatibility
            layout. This is intentionally not reused by the Professional Panel. */
         if (m->layout == LAYOUT_VERTICAL_LED) {
-            render_stereo_vertical(m, effect, color_param, 0, 0, w, h, true, true);
+            render_stereo_vertical(m, effect, color_param, 0, 0, w, h, false, true);
         } else if (m->layout == LAYOUT_SINGLE || m->layout == LAYOUT_SINGLE_SLIM) {
             render_stereo_horizontal(m, effect, color_param, 0, 0, w, h,
                                      true, m->layout == LAYOUT_SINGLE_SLIM);
         } else {
             render_stereo_horizontal(m, effect, color_param, 0, 0, w, h,
-                                     true, m->layout == LAYOUT_SLIM_LED);
+                                     m->layout != LAYOUT_BASIC,
+                                     m->layout == LAYOUT_SLIM_LED);
         }
         break;
     }
@@ -981,15 +960,27 @@ static void vu_render(void *data, gs_effect_t *)
         return;
     }
 
-    if (m->background_mode != BG_TRANSPARENT) {
-        uint32_t bg = style_background_color(m);
-        if (m->background_mode == BG_CHROMA_GREEN)
-            bg = 0xFF00FF00;
-        else if (m->background_mode == BG_CHROMA_BLUE)
-            bg = 0xFF0000FF;
-        else if (m->background_mode == BG_BLACK)
-            bg = 0xFF000000;
-        render_rect(effect, color_param, bg, 0, 0, (float)cx, (float)cy);
+    const bool chroma = m->background_mode == BG_CHROMA_GREEN ||
+                        m->background_mode == BG_CHROMA_BLUE;
+
+    if (chroma) {
+        render_rect(effect, color_param,
+                    m->background_mode == BG_CHROMA_GREEN ? 0xFF00FF00 : 0xFF0000FF,
+                    0, 0, (float)cx, (float)cy);
+    } else if (m->background_mode == BG_TRANSPARENT) {
+        // Leave the OBS canvas transparent. This is important for chroma/key
+        // workflows and for the classic LED-only layout.
+    } else if (m->layout == LAYOUT_BASIC || m->layout == LAYOUT_SLIM_LED ||
+               m->layout == LAYOUT_SINGLE || m->layout == LAYOUT_SINGLE_SLIM ||
+               m->layout == LAYOUT_VERTICAL_LED) {
+        // Classic LED layouts intentionally keep the clean v2.x look.
+        render_rect(effect, color_param, style_background_color(m),
+                    0, 0, (float)cx, (float)cy);
+    } else {
+        // Modern layouts use an actual high-resolution panel texture.
+        render_image_background(m, obs_get_base_effect(OBS_EFFECT_DEFAULT),
+                                (float)cx, (float)cy);
+        render_background_overlay(effect, color_param, (float)cx, (float)cy);
     }
 
     render_layout(m, effect, color_param, (float)cx, (float)cy);
@@ -1023,6 +1014,7 @@ static void *vu_create(obs_data_t *, obs_source_t *source)
     if (m->volmeter)
         obs_volmeter_add_callback(m->volmeter, meter_callback, m);
 
+    set_background_file(m);
     return m;
 }
 
@@ -1042,6 +1034,11 @@ static void vu_destroy(void *data)
     if (m->attached_source) {
         obs_source_release(m->attached_source);
         m->attached_source = nullptr;
+    }
+
+    if (m->background_initialized) {
+        gs_image_file_free(&m->background_image);
+        m->background_initialized = false;
     }
 
     delete m;
@@ -1070,6 +1067,7 @@ static void vu_update(void *data, obs_data_t *settings)
     m->mono_channel = std::clamp((int)obs_data_get_int(settings, "mono_channel"), 0, 1);
     m->visual_style = std::clamp((int)obs_data_get_int(settings, "visual_style"), 0, 7);
     m->background_mode = std::clamp((int)obs_data_get_int(settings, "background_mode"), 0, 4);
+    set_background_file(m);
     m->show_peak = obs_data_get_bool(settings, "show_peak");
     m->show_hold = obs_data_get_bool(settings, "show_hold");
     m->peak_hold_seconds = (float)obs_data_get_double(settings, "peak_hold");
