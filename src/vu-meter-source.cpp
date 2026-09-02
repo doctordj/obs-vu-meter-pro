@@ -1,20 +1,52 @@
 #include "vu-meter-source.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
-#include <string>
-#include <vector>
 
 namespace {
 
 constexpr float DEFAULT_MIN_DB = -60.0f;
 constexpr float DEFAULT_WARN_DB = -18.0f;
 constexpr float DEFAULT_ERROR_DB = -6.0f;
-constexpr float DEFAULT_CLIP_DB = 0.0f;
+
+enum Layout {
+    LAYOUT_BASIC = 0,
+    LAYOUT_PRO_PANEL = 1,
+    LAYOUT_SLIM_LED = 2,
+    LAYOUT_ANALOG = 3,
+    LAYOUT_DOUBLE_SCALE = 4,
+    LAYOUT_SINGLE = 5,
+    LAYOUT_SINGLE_SLIM = 6,
+    LAYOUT_VERTICAL_PANEL = 7,
+    LAYOUT_VERTICAL_LED = 8,
+    LAYOUT_ANALOG_VERTICAL = 9
+};
+
+enum MeterMode {
+    METER_STEREO = 0,
+    METER_SINGLE = 1
+};
+
+enum VisualStyle {
+    STYLE_PRO = 0,
+    STYLE_LED = 1,
+    STYLE_ANALOG = 2,
+    STYLE_MINIMAL = 3,
+    STYLE_NEON = 4,
+    STYLE_WHITE = 5,
+    STYLE_DARK = 6,
+    STYLE_RETRO = 7
+};
+
+enum BackgroundMode {
+    BG_NORMAL = 0,
+    BG_TRANSPARENT = 1,
+    BG_CHROMA_GREEN = 2,
+    BG_CHROMA_BLUE = 3,
+    BG_BLACK = 4
+};
 
 struct vu_meter {
     obs_source_t *source = nullptr;
@@ -25,24 +57,25 @@ struct vu_meter {
     float magnitude[2] = {DEFAULT_MIN_DB, DEFAULT_MIN_DB};
     float peak[2] = {DEFAULT_MIN_DB, DEFAULT_MIN_DB};
     float hold[2] = {DEFAULT_MIN_DB, DEFAULT_MIN_DB};
-    bool clipped[2] = {false, false};
+    float hold_age[2] = {0.0f, 0.0f};
 
     float min_db = DEFAULT_MIN_DB;
     float warning_db = DEFAULT_WARN_DB;
     float error_db = DEFAULT_ERROR_DB;
-    float clip_db = DEFAULT_CLIP_DB;
 
     int segments = 32;
     int gap = 3;
     int thickness = 10;
-    int direction = 0; // 0 horizontal, 1 vertical
-    int meter_mode = 0; // 0 stereo (L/R), 1 single bar
-    int mono_channel = 0; // 0 left, 1 right
+    int layout = LAYOUT_BASIC;
+    int meter_mode = METER_STEREO;
+    int mono_channel = 0;
+    int visual_style = STYLE_PRO;
+    int background_mode = BG_NORMAL;
+
     bool show_peak = true;
     bool show_hold = true;
     float peak_hold_seconds = 1.5f;
     float peak_decay_db_per_sec = 18.0f;
-    bool rounded = false; // reserved for future rounded renderer
 
     uint32_t color_green = 0xFF35E06F;
     uint32_t color_yellow = 0xFFFFD84D;
@@ -51,9 +84,7 @@ struct vu_meter {
     uint32_t color_background = 0xB0101419;
     uint32_t color_peak = 0xFFFFFFFF;
     uint32_t color_hold = 0xFF00FFFF;
-
-    float hold_age[2] = {0.0f, 0.0f};
-    float last_tick = 0.0f;
+    uint32_t color_frame = 0xFF353B43;
 };
 
 static const char *vu_name(void *)
@@ -75,48 +106,67 @@ static float level_to_fraction(float db, float min_db)
     return std::clamp((db - min_db) / (0.0f - min_db), 0.0f, 1.0f);
 }
 
-/*
- * OBS color properties are stored as RGBA (R in the least-significant
- * byte), while gs_effect_set_color() expects ARGB.
- *
- * Keeping this conversion at the settings boundary makes custom colors
- * selected in the OBS color picker render exactly as selected.
- */
-static uint32_t color_property_to_argb(long long rgba_value)
+/* OBS color properties are RGBA; the graphics effect consumes ARGB. */
+static uint32_t color_property_to_argb(long long value)
 {
-    const uint32_t rgba = (uint32_t)rgba_value;
+    const uint32_t rgba = (uint32_t)value;
     const uint32_t r = rgba & 0xFFu;
     const uint32_t g = (rgba >> 8) & 0xFFu;
     const uint32_t b = (rgba >> 16) & 0xFFu;
     const uint32_t a = (rgba >> 24) & 0xFFu;
-
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-static uint32_t color_property_to_argb_migrated(long long value,
-                                                     uint32_t legacy_argb)
+static uint32_t migrate_color(long long value, uint32_t legacy_argb)
 {
     const uint32_t raw = (uint32_t)value;
-
-    /*
-     * Versions 2.1/2.1.1 stored their built-in defaults in ARGB even though
-     * OBS color properties are RGBA. Preserve those existing default values
-     * when an old source is upgraded; user-selected colors are converted.
-     */
-    if (raw == legacy_argb)
-        return raw;
-
-    return color_property_to_argb(value);
+    return raw == legacy_argb ? raw : color_property_to_argb(value);
 }
 
-
-static uint32_t segment_color(const vu_meter *m, float segment_db)
+static uint32_t segment_color(const vu_meter *m, float db)
 {
-    if (segment_db >= m->error_db)
+    if (db >= m->error_db)
         return m->color_red;
-    if (segment_db >= m->warning_db)
+    if (db >= m->warning_db)
         return m->color_yellow;
     return m->color_green;
+}
+
+static uint32_t style_frame_color(const vu_meter *m)
+{
+    switch (m->visual_style) {
+    case STYLE_LED:     return 0xFF263238;
+    case STYLE_ANALOG:  return 0xFF7B6A4A;
+    case STYLE_MINIMAL: return 0xFF555B64;
+    case STYLE_NEON:    return 0xFF00CFFF;
+    case STYLE_WHITE:   return 0xFFD0D5DB;
+    case STYLE_DARK:    return 0xFF161A1F;
+    case STYLE_RETRO:   return 0xFFB79B61;
+    default:            return m->color_frame;
+    }
+}
+
+static uint32_t style_off_color(const vu_meter *m)
+{
+    switch (m->visual_style) {
+    case STYLE_NEON:   return 0xFF101B22;
+    case STYLE_WHITE:  return 0xFFCBD1D8;
+    case STYLE_ANALOG: return 0xFF27221A;
+    case STYLE_RETRO:  return 0xFF3A3022;
+    default:           return m->color_off;
+    }
+}
+
+static uint32_t style_background_color(const vu_meter *m)
+{
+    switch (m->visual_style) {
+    case STYLE_WHITE:  return 0xE8E9ECEF;
+    case STYLE_ANALOG: return 0xE0181714;
+    case STYLE_RETRO:  return 0xE0221D16;
+    case STYLE_NEON:   return 0xE8061118;
+    case STYLE_DARK:   return 0xF0080A0D;
+    default:           return m->color_background;
+    }
 }
 
 static void set_source(vu_meter *m, obs_source_t *new_source)
@@ -157,10 +207,11 @@ static void meter_callback(void *param,
 
     std::lock_guard<std::mutex> lock(m->level_mutex);
     for (int ch = 0; ch < 2; ++ch) {
-        const float p = clamp_db(peak[ch], m->min_db);
         const float mag = clamp_db(magnitude[ch], m->min_db);
-        m->peak[ch] = p;
+        const float p = clamp_db(peak[ch], m->min_db);
         m->magnitude[ch] = mag;
+        m->peak[ch] = p;
+
         if (p >= m->hold[ch]) {
             m->hold[ch] = p;
             m->hold_age[ch] = 0.0f;
@@ -174,78 +225,66 @@ static void render_rect(gs_effect_t *effect, gs_eparam_t *color_param,
     if (!effect || !color_param || w <= 0.0f || h <= 0.0f)
         return;
 
-    /*
-     * OBS's OBS_EFFECT_SOLID is the same solid-color technique used by
-     * OBS itself for simple rectangles.  Keep the draw operation isolated
-     * so every rectangle gets its own color and transform.
-     */
     gs_effect_set_color(color_param, color);
-
     gs_matrix_push();
     gs_matrix_translate3f(x, y, 0.0f);
-
     while (gs_effect_loop(effect, "Solid"))
         gs_draw_quadf(nullptr, 0, w, h);
-
     gs_matrix_pop();
 }
 
-static void render_bar(vu_meter *m, gs_effect_t *effect, gs_eparam_t *color_param,
-                       float x, float y, float w, float h, float db)
+static void render_frame(gs_effect_t *effect, gs_eparam_t *color_param,
+                         uint32_t color, float x, float y, float w, float h,
+                         float border)
 {
-    if (!m || !effect || !color_param || m->segments <= 0)
+    const float b = std::max(1.0f, border);
+    render_rect(effect, color_param, color, x, y, w, b);
+    render_rect(effect, color_param, color, x, y + h - b, w, b);
+    render_rect(effect, color_param, color, x, y, b, h);
+    render_rect(effect, color_param, color, x + w - b, y, b, h);
+}
+
+static void render_segment_bar(vu_meter *m, gs_effect_t *effect,
+                               gs_eparam_t *color_param,
+                               float x, float y, float w, float h,
+                               float db, bool vertical)
+{
+    if (!m || m->segments <= 0)
         return;
 
     const float frac = level_to_fraction(db, m->min_db);
-    const float segment_span =
-        (m->direction == 0 ? w : h) / (float)m->segments;
-    const float gap = std::min((float)m->gap, std::max(0.0f, segment_span - 1.0f));
+    const float span = (vertical ? h : w) / (float)m->segments;
+    const float gap = std::min((float)m->gap, std::max(0.0f, span - 1.0f));
+    const uint32_t off = style_off_color(m);
 
     for (int i = 0; i < m->segments; ++i) {
         const float start = (float)i / (float)m->segments;
         const float end = (float)(i + 1) / (float)m->segments;
+        const bool on = ((float)i + 1.0f) / (float)m->segments <= frac + 0.0001f;
 
-        /*
-         * Horizontal: fills from left to right.
-         * Vertical: fills from bottom to top, as expected for a
-         * conventional VU meter rotated 90 degrees.
-         */
-        const float pos0 = (m->direction == 0)
-            ? x + start * w
-            : y + (1.0f - end) * h;
-        const float pos1 = (m->direction == 0)
-            ? x + end * w
-            : y + (1.0f - start) * h;
-        const float size = std::max(1.0f, pos1 - pos0 - gap);
-
-        const bool on =
-            ((float)i + 1.0f) / (float)m->segments <= frac + 0.0001f;
-
-        const float segment_db =
-            m->min_db +
+        const float db_mid = m->min_db +
             ((float)i + 0.5f) / (float)m->segments * (-m->min_db);
+        const uint32_t color = on ? segment_color(m, db_mid) : off;
 
-        const uint32_t color =
-            on ? segment_color(m, segment_db) : m->color_off;
-
-        if (m->direction == 0)
-            render_rect(effect, color_param, color, pos0, y, size, h);
-        else
-            render_rect(effect, color_param, color, x, pos0, w, size);
+        if (!vertical) {
+            const float px = x + start * w;
+            const float pw = std::max(1.0f, (end - start) * w - gap);
+            render_rect(effect, color_param, color, px, y, pw, h);
+        } else {
+            /* Bottom-to-top: segment zero is at the bottom. */
+            const float py = y + (1.0f - end) * h;
+            const float ph = std::max(1.0f, (end - start) * h - gap);
+            render_rect(effect, color_param, color, x, py, w, ph);
+        }
     }
 }
 
-/*
- * Draws one complete segment at the requested normalized position.
- * Peak indicators are intentionally segment-sized rather than a 2-pixel
- * marker, so the indicator remains clearly visible at any OBS scale.
- */
 static void render_peak_segment(vu_meter *m, gs_effect_t *effect,
                                 gs_eparam_t *color_param,
                                 float x, float y, float w, float h,
-                                float db, uint32_t color)
+                                float db, bool vertical, uint32_t color)
 {
-    if (!m || !effect || !color_param || m->segments <= 0)
+    if (!m || m->segments <= 0)
         return;
 
     const float frac = level_to_fraction(db, m->min_db);
@@ -257,30 +296,231 @@ static void render_peak_segment(vu_meter *m, gs_effect_t *effect,
 
     const float start = (float)index / (float)m->segments;
     const float end = (float)(index + 1) / (float)m->segments;
+    const float span = (vertical ? h : w) / (float)m->segments;
+    const float gap = std::min((float)m->gap, std::max(0.0f, span - 1.0f));
 
-    /*
-     * Keep Peak / Peak Hold aligned with the same bottom-to-top
-     * orientation used by the active meter segments.
-     */
-    const float pos0 = (m->direction == 0)
-        ? x + start * w
-        : y + (1.0f - end) * h;
-    const float pos1 = (m->direction == 0)
-        ? x + end * w
-        : y + (1.0f - start) * h;
-
-    const float span = pos1 - pos0;
-    const float gap =
-        std::min((float)m->gap, std::max(0.0f, span - 1.0f));
-    const float size = std::max(1.0f, span - gap);
-
-    if (m->direction == 0)
-        render_rect(effect, color_param, color, pos0, y, size, h);
-    else
-        render_rect(effect, color_param, color, x, pos0, w, size);
+    if (!vertical) {
+        const float px = x + start * w;
+        const float pw = std::max(1.0f, (end - start) * w - gap);
+        render_rect(effect, color_param, color, px, y, pw, h);
+    } else {
+        const float py = y + (1.0f - end) * h;
+        const float ph = std::max(1.0f, (end - start) * h - gap);
+        render_rect(effect, color_param, color, x, py, w, ph);
+    }
 }
 
-static void vu_render(void *data, gs_effect_t *effect_unused)
+static void render_analog(vu_meter *m, gs_effect_t *effect,
+                          gs_eparam_t *color_param,
+                          float x, float y, float w, float h,
+                          float db, bool vertical)
+{
+    const uint32_t frame = style_frame_color(m);
+    render_rect(effect, color_param, 0xFF07090B, x, y, w, h);
+    render_frame(effect, color_param, frame, x, y, w, h, 3.0f);
+
+    const float frac = level_to_fraction(db, m->min_db);
+
+    if (!vertical) {
+        /* Track */
+        render_rect(effect, color_param, 0xFF171A1E,
+                     x + 8.0f, y + h * 0.35f, w - 16.0f, h * 0.30f);
+        render_segment_bar(m, effect, color_param,
+                           x + 8.0f, y + h * 0.35f, w - 16.0f, h * 0.30f,
+                           db, false);
+        /* Needle */
+        const float nx = x + 8.0f + frac * (w - 16.0f);
+        render_rect(effect, color_param, 0xFFFFFFFF,
+                    nx - 1.5f, y + 4.0f, 3.0f, h - 8.0f);
+    } else {
+        render_rect(effect, color_param, 0xFF171A1E,
+                     x + w * 0.35f, y + 8.0f, w * 0.30f, h - 16.0f);
+        render_segment_bar(m, effect, color_param,
+                           x + w * 0.35f, y + 8.0f,
+                           w * 0.30f, h - 16.0f, db, true);
+        const float ny = y + (1.0f - frac) * (h - 16.0f) + 8.0f;
+        render_rect(effect, color_param, 0xFFFFFFFF,
+                    x + 4.0f, ny - 1.5f, w - 8.0f, 3.0f);
+    }
+}
+
+static void render_stereo_horizontal(vu_meter *m, gs_effect_t *effect,
+                                      gs_eparam_t *color_param,
+                                      float x, float y, float w, float h,
+                                      bool framed, bool slim)
+{
+    const float pad = framed ? 18.0f : 6.0f;
+    const float gap = slim ? 6.0f : 12.0f;
+    const float bw = w - 2.0f * pad;
+    const float bh = std::max(4.0f, (h - 2.0f * pad - gap) / 2.0f);
+
+    if (framed)
+        render_frame(effect, color_param, style_frame_color(m),
+                     x, y, w, h, 3.0f);
+
+    if (m->meter_mode == METER_SINGLE) {
+        const int ch = m->mono_channel == 1 ? 1 : 0;
+        render_segment_bar(m, effect, color_param,
+                           x + pad, y + pad, bw, h - 2.0f * pad,
+                           m->magnitude[ch], false);
+        if (m->show_hold)
+            render_peak_segment(m, effect, color_param,
+                                x + pad, y + pad, bw, h - 2.0f * pad,
+                                m->hold[ch], false, m->color_hold);
+        if (m->show_peak)
+            render_peak_segment(m, effect, color_param,
+                                x + pad, y + pad, bw, h - 2.0f * pad,
+                                m->peak[ch], false, m->color_peak);
+        return;
+    }
+
+    render_segment_bar(m, effect, color_param,
+                       x + pad, y + pad, bw, bh, m->magnitude[0], false);
+    render_segment_bar(m, effect, color_param,
+                       x + pad, y + pad + bh + gap, bw, bh, m->magnitude[1], false);
+
+    if (m->show_hold) {
+        render_peak_segment(m, effect, color_param,
+                            x + pad, y + pad, bw, bh, m->hold[0], false, m->color_hold);
+        render_peak_segment(m, effect, color_param,
+                            x + pad, y + pad + bh + gap, bw, bh,
+                            m->hold[1], false, m->color_hold);
+    }
+
+    if (m->show_peak) {
+        render_peak_segment(m, effect, color_param,
+                            x + pad, y + pad, bw, bh, m->peak[0], false, m->color_peak);
+        render_peak_segment(m, effect, color_param,
+                            x + pad, y + pad + bh + gap, bw, bh,
+                            m->peak[1], false, m->color_peak);
+    }
+}
+
+static void render_stereo_vertical(vu_meter *m, gs_effect_t *effect,
+                                   gs_eparam_t *color_param,
+                                   float x, float y, float w, float h,
+                                   bool framed, bool slim)
+{
+    const float pad = framed ? 18.0f : 6.0f;
+    const float gap = slim ? 6.0f : 12.0f;
+    const float bw = std::max(4.0f, (w - 2.0f * pad - gap) / 2.0f);
+    const float bh = h - 2.0f * pad;
+
+    if (framed)
+        render_frame(effect, color_param, style_frame_color(m),
+                     x, y, w, h, 3.0f);
+
+    if (m->meter_mode == METER_SINGLE) {
+        const int ch = m->mono_channel == 1 ? 1 : 0;
+        render_segment_bar(m, effect, color_param,
+                           x + pad, y + pad, w - 2.0f * pad, bh,
+                           m->magnitude[ch], true);
+        if (m->show_hold)
+            render_peak_segment(m, effect, color_param,
+                                x + pad, y + pad, w - 2.0f * pad, bh,
+                                m->hold[ch], true, m->color_hold);
+        if (m->show_peak)
+            render_peak_segment(m, effect, color_param,
+                                x + pad, y + pad, w - 2.0f * pad, bh,
+                                m->peak[ch], true, m->color_peak);
+        return;
+    }
+
+    render_segment_bar(m, effect, color_param,
+                       x + pad, y + pad, bw, bh, m->magnitude[0], true);
+    render_segment_bar(m, effect, color_param,
+                       x + pad + bw + gap, y + pad, bw, bh, m->magnitude[1], true);
+
+    if (m->show_hold) {
+        render_peak_segment(m, effect, color_param,
+                            x + pad, y + pad, bw, bh, m->hold[0], true, m->color_hold);
+        render_peak_segment(m, effect, color_param,
+                            x + pad + bw + gap, y + pad, bw, bh,
+                            m->hold[1], true, m->color_hold);
+    }
+
+    if (m->show_peak) {
+        render_peak_segment(m, effect, color_param,
+                            x + pad, y + pad, bw, bh, m->peak[0], true, m->color_peak);
+        render_peak_segment(m, effect, color_param,
+                            x + pad + bw + gap, y + pad, bw, bh,
+                            m->peak[1], true, m->color_peak);
+    }
+}
+
+static void render_layout(vu_meter *m, gs_effect_t *effect,
+                          gs_eparam_t *color_param,
+                          float w, float h)
+{
+    switch (m->layout) {
+    case LAYOUT_PRO_PANEL:
+        render_stereo_horizontal(m, effect, color_param, 0, 0, w, h, true, false);
+        break;
+
+    case LAYOUT_SLIM_LED:
+        render_stereo_horizontal(m, effect, color_param, 0, 0, w, h, false, true);
+        break;
+
+    case LAYOUT_ANALOG:
+        if (m->meter_mode == METER_SINGLE) {
+            const int ch = m->mono_channel == 1 ? 1 : 0;
+            render_analog(m, effect, color_param, 0, 0, w, h,
+                          m->magnitude[ch], false);
+        } else {
+            const float gap = 10.0f;
+            const float bh = (h - gap) * 0.5f;
+            render_analog(m, effect, color_param, 0, 0, w, bh,
+                          m->magnitude[0], false);
+            render_analog(m, effect, color_param, 0, bh + gap, w, bh,
+                          m->magnitude[1], false);
+        }
+        break;
+
+    case LAYOUT_DOUBLE_SCALE:
+        render_stereo_horizontal(m, effect, color_param, 0, 0, w, h, true, false);
+        /* Central reference line. */
+        render_rect(effect, color_param, style_frame_color(m),
+                    w * 0.5f - 1.0f, 8.0f, 2.0f, h - 16.0f);
+        break;
+
+    case LAYOUT_SINGLE:
+        render_stereo_horizontal(m, effect, color_param, 0, 0, w, h, true, false);
+        break;
+
+    case LAYOUT_SINGLE_SLIM:
+        render_stereo_horizontal(m, effect, color_param, 0, 0, w, h, false, true);
+        break;
+
+    case LAYOUT_VERTICAL_PANEL:
+        render_stereo_vertical(m, effect, color_param, 0, 0, w, h, true, false);
+        break;
+
+    case LAYOUT_VERTICAL_LED:
+        render_stereo_vertical(m, effect, color_param, 0, 0, w, h, false, true);
+        break;
+
+    case LAYOUT_ANALOG_VERTICAL:
+        if (m->meter_mode == METER_SINGLE) {
+            const int ch = m->mono_channel == 1 ? 1 : 0;
+            render_analog(m, effect, color_param, 0, 0, w, h,
+                          m->magnitude[ch], true);
+        } else {
+            const float gap = 10.0f;
+            const float bw = (w - gap) * 0.5f;
+            render_analog(m, effect, color_param, 0, 0, bw, h,
+                          m->magnitude[0], true);
+            render_analog(m, effect, color_param, bw + gap, 0, bw, h,
+                          m->magnitude[1], true);
+        }
+        break;
+
+    default: /* LAYOUT_BASIC */
+        render_stereo_horizontal(m, effect, color_param, 0, 0, w, h, false, false);
+        break;
+    }
+}
+
+static void vu_render(void *data, gs_effect_t *)
 {
     auto *m = static_cast<vu_meter *>(data);
     if (!m || !m->source)
@@ -288,48 +528,29 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
 
     const uint32_t cx = obs_source_get_width(m->source);
     const uint32_t cy = obs_source_get_height(m->source);
-
     if (!cx || !cy)
         return;
 
-    float magnitude[2];
-    float peak[2];
-    float hold[2];
-    int direction;
-    int meter_mode;
-    int mono_channel;
-    bool show_peak;
-    bool show_hold;
-    uint32_t color_background;
-    uint32_t color_peak;
-    uint32_t color_hold;
-
+    float magnitude[2], peak[2], hold[2];
     {
         std::lock_guard<std::mutex> lock(m->level_mutex);
-
         magnitude[0] = m->magnitude[0];
         magnitude[1] = m->magnitude[1];
         peak[0] = m->peak[0];
         peak[1] = m->peak[1];
         hold[0] = m->hold[0];
         hold[1] = m->hold[1];
-
-        direction = m->direction;
-        meter_mode = m->meter_mode;
-        mono_channel = m->mono_channel;
-        show_peak = m->show_peak;
-        show_hold = m->show_hold;
-        color_background = m->color_background;
-        color_peak = m->color_peak;
-        color_hold = m->color_hold;
     }
 
-    (void)effect_unused;
+    /* Copy the current values back into local rendering state so the
+       renderer remains stable even if the audio callback runs concurrently. */
+    m->magnitude[0] = magnitude[0];
+    m->magnitude[1] = magnitude[1];
+    m->peak[0] = peak[0];
+    m->peak[1] = peak[1];
+    m->hold[0] = hold[0];
+    m->hold[1] = hold[1];
 
-    /*
-     * OBS already provides the correct source-local graphics transform.
-     * Do not replace its viewport/projection/model matrix here.
-     */
     gs_blend_state_push();
     gs_enable_blending(true);
     gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
@@ -340,153 +561,36 @@ static void vu_render(void *data, gs_effect_t *effect_unused)
         return;
     }
 
-    gs_eparam_t *color_param =
-        gs_effect_get_param_by_name(effect, "color");
-
+    gs_eparam_t *color_param = gs_effect_get_param_by_name(effect, "color");
     if (!color_param) {
         gs_blend_state_pop();
         return;
     }
 
-    const float outer = 6.0f;
-
-    /* Clean background, including alpha configured by the user. */
-    render_rect(effect, color_param, color_background,
-                0.0f, 0.0f, (float)cx, (float)cy);
-
-    /*
-     * Refined layout:
-     * - Stereo: two independent L/R bars.
-     * - Single: one full-width/full-height bar using the selected L or R
-     *   channel. This is useful for placing one meter on each side of a
-     *   composition.
-     *
-     * We deliberately keep the source dimensions stable per orientation,
-     * so existing OBS scene transforms do not jump unexpectedly.
-     */
-    if (direction == 0) {
-        if (meter_mode == 1) {
-            const float bar_x = outer;
-            const float bar_y = outer;
-            const float bar_w = std::max(1.0f, (float)cx - outer * 2.0f);
-            const float bar_h = std::max(1.0f, (float)cy - outer * 2.0f);
-            const int ch = mono_channel == 1 ? 1 : 0;
-
-            render_bar(m, effect, color_param,
-                       bar_x, bar_y, bar_w, bar_h, magnitude[ch]);
-
-            if (show_hold)
-                render_peak_segment(m, effect, color_param,
-                                    bar_x, bar_y, bar_w, bar_h,
-                                    hold[ch], color_hold);
-
-            if (show_peak)
-                render_peak_segment(m, effect, color_param,
-                                    bar_x, bar_y, bar_w, bar_h,
-                                    peak[ch], color_peak);
-        } else {
-            const float bar_h =
-                std::max(1.0f, ((float)cy - outer * 3.0f) / 2.0f);
-            const float bar_w =
-                std::max(1.0f, (float)cx - outer * 2.0f);
-
-            render_bar(m, effect, color_param,
-                       outer, outer, bar_w, bar_h, magnitude[0]);
-
-            render_bar(m, effect, color_param,
-                       outer, outer * 2.0f + bar_h,
-                       bar_w, bar_h, magnitude[1]);
-
-            if (show_hold) {
-                render_peak_segment(m, effect, color_param,
-                                    outer, outer, bar_w, bar_h,
-                                    hold[0], color_hold);
-
-                render_peak_segment(m, effect, color_param,
-                                    outer, outer * 2.0f + bar_h,
-                                    bar_w, bar_h,
-                                    hold[1], color_hold);
-            }
-
-            if (show_peak) {
-                render_peak_segment(m, effect, color_param,
-                                    outer, outer, bar_w, bar_h,
-                                    peak[0], color_peak);
-
-                render_peak_segment(m, effect, color_param,
-                                    outer, outer * 2.0f + bar_h,
-                                    bar_w, bar_h,
-                                    peak[1], color_peak);
-            }
-        }
-    } else {
-        if (meter_mode == 1) {
-            const float bar_x = outer;
-            const float bar_y = outer;
-            const float bar_w = std::max(1.0f, (float)cx - outer * 2.0f);
-            const float bar_h = std::max(1.0f, (float)cy - outer * 2.0f);
-            const int ch = mono_channel == 1 ? 1 : 0;
-
-            render_bar(m, effect, color_param,
-                       bar_x, bar_y, bar_w, bar_h, magnitude[ch]);
-
-            if (show_hold)
-                render_peak_segment(m, effect, color_param,
-                                    bar_x, bar_y, bar_w, bar_h,
-                                    hold[ch], color_hold);
-
-            if (show_peak)
-                render_peak_segment(m, effect, color_param,
-                                    bar_x, bar_y, bar_w, bar_h,
-                                    peak[ch], color_peak);
-        } else {
-            const float bar_w =
-                std::max(1.0f, ((float)cx - outer * 3.0f) / 2.0f);
-            const float bar_h =
-                std::max(1.0f, (float)cy - outer * 2.0f);
-
-            render_bar(m, effect, color_param,
-                       outer, outer, bar_w, bar_h, magnitude[0]);
-
-            render_bar(m, effect, color_param,
-                       outer * 2.0f + bar_w, outer,
-                       bar_w, bar_h, magnitude[1]);
-
-            if (show_hold) {
-                render_peak_segment(m, effect, color_param,
-                                    outer, outer, bar_w, bar_h,
-                                    hold[0], color_hold);
-
-                render_peak_segment(m, effect, color_param,
-                                    outer * 2.0f + bar_w, outer,
-                                    bar_w, bar_h,
-                                    hold[1], color_hold);
-            }
-
-            if (show_peak) {
-                render_peak_segment(m, effect, color_param,
-                                    outer, outer, bar_w, bar_h,
-                                    peak[0], color_peak);
-
-                render_peak_segment(m, effect, color_param,
-                                    outer * 2.0f + bar_w, outer,
-                                    bar_w, bar_h,
-                                    peak[1], color_peak);
-            }
-        }
+    if (m->background_mode != BG_TRANSPARENT) {
+        uint32_t bg = style_background_color(m);
+        if (m->background_mode == BG_CHROMA_GREEN)
+            bg = 0xFF00FF00;
+        else if (m->background_mode == BG_CHROMA_BLUE)
+            bg = 0xFF0000FF;
+        else if (m->background_mode == BG_BLACK)
+            bg = 0xFF000000;
+        render_rect(effect, color_param, bg, 0, 0, (float)cx, (float)cy);
     }
 
+    render_layout(m, effect, color_param, (float)cx, (float)cy);
     gs_blend_state_pop();
 }
 
 static void vu_tick(void *data, float seconds)
 {
-    
     auto *m = static_cast<vu_meter *>(data);
     if (!m)
         return;
+
     const float dt = std::clamp(seconds, 0.0f, 0.25f);
     std::lock_guard<std::mutex> lock(m->level_mutex);
+
     for (int ch = 0; ch < 2; ++ch) {
         m->hold_age[ch] += dt;
         if (m->hold_age[ch] > m->peak_hold_seconds) {
@@ -496,13 +600,10 @@ static void vu_tick(void *data, float seconds)
     }
 }
 
-static void *vu_create(obs_data_t *settings, obs_source_t *source)
+static void *vu_create(obs_data_t *, obs_source_t *source)
 {
-    (void)settings;
-
     auto *m = new vu_meter();
     m->source = source;
-
     m->volmeter = obs_volmeter_create(OBS_FADER_LOG);
 
     if (m->volmeter)
@@ -523,10 +624,12 @@ static void vu_destroy(void *data)
         obs_volmeter_destroy(m->volmeter);
         m->volmeter = nullptr;
     }
+
     if (m->attached_source) {
         obs_source_release(m->attached_source);
         m->attached_source = nullptr;
     }
+
     delete m;
 }
 
@@ -548,115 +651,133 @@ static void vu_update(void *data, obs_data_t *settings)
     m->segments = std::clamp((int)obs_data_get_int(settings, "segments"), 8, 96);
     m->gap = std::clamp((int)obs_data_get_int(settings, "gap"), 0, 12);
     m->thickness = std::clamp((int)obs_data_get_int(settings, "thickness"), 2, 40);
-    m->direction = std::clamp((int)obs_data_get_int(settings, "direction"), 0, 1);
+    m->layout = std::clamp((int)obs_data_get_int(settings, "layout"), 0, 9);
     m->meter_mode = std::clamp((int)obs_data_get_int(settings, "meter_mode"), 0, 1);
     m->mono_channel = std::clamp((int)obs_data_get_int(settings, "mono_channel"), 0, 1);
+    m->visual_style = std::clamp((int)obs_data_get_int(settings, "visual_style"), 0, 7);
+    m->background_mode = std::clamp((int)obs_data_get_int(settings, "background_mode"), 0, 4);
     m->show_peak = obs_data_get_bool(settings, "show_peak");
     m->show_hold = obs_data_get_bool(settings, "show_hold");
     m->peak_hold_seconds = (float)obs_data_get_double(settings, "peak_hold");
     m->peak_decay_db_per_sec = (float)obs_data_get_double(settings, "peak_decay");
 
-    m->color_green = color_property_to_argb_migrated(
-        obs_data_get_int(settings, "color_green"), 0xFF35E06F);
-    m->color_yellow = color_property_to_argb_migrated(
-        obs_data_get_int(settings, "color_yellow"), 0xFFFFD84D);
-    m->color_red = color_property_to_argb_migrated(
-        obs_data_get_int(settings, "color_red"), 0xFFFF3B30);
-    m->color_off = color_property_to_argb_migrated(
-        obs_data_get_int(settings, "color_off"), 0xFF20252B);
-    m->color_background = color_property_to_argb_migrated(
-        obs_data_get_int(settings, "color_background"), 0xB0101419);
-    m->color_peak = color_property_to_argb_migrated(
-        obs_data_get_int(settings, "color_peak"), 0xFFFFFFFF);
-    m->color_hold = color_property_to_argb(obs_data_get_int(settings, "color_hold"));
+    m->color_green = migrate_color(obs_data_get_int(settings, "color_green"), 0xFF35E06F);
+    m->color_yellow = migrate_color(obs_data_get_int(settings, "color_yellow"), 0xFFFFD84D);
+    m->color_red = migrate_color(obs_data_get_int(settings, "color_red"), 0xFFFF3B30);
+    m->color_off = migrate_color(obs_data_get_int(settings, "color_off"), 0xFF20252B);
+    m->color_background = migrate_color(obs_data_get_int(settings, "color_background"), 0xB0101419);
+    m->color_peak = migrate_color(obs_data_get_int(settings, "color_peak"), 0xFFFFFFFF);
+    m->color_hold = migrate_color(obs_data_get_int(settings, "color_hold"), 0xFF00FFFF);
+    m->color_frame = migrate_color(obs_data_get_int(settings, "color_frame"), 0xFF353B43);
 }
 
 static bool enum_source(void *param, obs_source_t *source)
 {
     auto *list = static_cast<obs_property_t *>(param);
-    const uint32_t flags = obs_source_get_output_flags(source);
-    if ((flags & OBS_SOURCE_AUDIO) != 0) {
-        const char *name = obs_source_get_name(source);
-        if (name && *name)
-            obs_property_list_add_string(list, name, name);
-    }
+    if ((obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO) == 0)
+        return true;
+
+    const char *name = obs_source_get_name(source);
+    if (name && *name)
+        obs_property_list_add_string(list, name, name);
+
     return true;
 }
 
-static bool vu_meter_properties_modified(obs_properties_t *props,
-                                           obs_property_t *property,
-                                           obs_data_t *settings)
+static bool properties_modified(obs_properties_t *props,
+                                 obs_property_t *,
+                                 obs_data_t *settings)
 {
-    (void)property;
-
     if (!props || !settings)
         return false;
 
     obs_property_t *channel = obs_properties_get(props, "mono_channel");
-    if (!channel)
-        return false;
-
-    const bool single = obs_data_get_int(settings, "meter_mode") == 1;
-    obs_property_set_visible(channel, single);
+    if (channel)
+        obs_property_set_visible(channel,
+                                 obs_data_get_int(settings, "meter_mode") == METER_SINGLE);
 
     return true;
 }
 
-static obs_properties_t *vu_properties(void *data)
+static obs_properties_t *vu_properties(void *)
 {
-    (void)data;
     obs_properties_t *props = obs_properties_create();
 
-    obs_property_t *source_list = obs_properties_add_list(props, "source_name", "Fonte de áudio",
-                                                            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    obs_property_t *source_list =
+        obs_properties_add_list(props, "source_name", "Fonte de áudio",
+                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
     obs_property_list_add_string(source_list, "-- nenhuma --", "");
     obs_enum_sources(enum_source, source_list);
 
-    obs_properties_add_int(props, "segments", "Segmentos", 8, 96, 1);
+    obs_property_t *layout =
+        obs_properties_add_list(props, "layout", "Layout",
+                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(layout, "1. Básico (LED) — compatível com v2.x", LAYOUT_BASIC);
+    obs_property_list_add_int(layout, "2. Painel Profissional", LAYOUT_PRO_PANEL);
+    obs_property_list_add_int(layout, "3. Slim LED", LAYOUT_SLIM_LED);
+    obs_property_list_add_int(layout, "4. Clássico Analógico", LAYOUT_ANALOG);
+    obs_property_list_add_int(layout, "5. Escala Dupla", LAYOUT_DOUBLE_SCALE);
+    obs_property_list_add_int(layout, "6. Barra Única", LAYOUT_SINGLE);
+    obs_property_list_add_int(layout, "7. Barra Única Slim", LAYOUT_SINGLE_SLIM);
+    obs_property_list_add_int(layout, "8. Painel Vertical", LAYOUT_VERTICAL_PANEL);
+    obs_property_list_add_int(layout, "9. LED Vertical", LAYOUT_VERTICAL_LED);
+    obs_property_list_add_int(layout, "10. Analógico Vertical", LAYOUT_ANALOG_VERTICAL);
+
+    obs_property_t *mode =
+        obs_properties_add_list(props, "meter_mode", "Modo do medidor",
+                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(mode, "Estéreo — L + R", METER_STEREO);
+    obs_property_list_add_int(mode, "Barra única", METER_SINGLE);
+
+    obs_property_t *channel =
+        obs_properties_add_list(props, "mono_channel", "Canal da barra única",
+                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(channel, "L — Esquerdo", 0);
+    obs_property_list_add_int(channel, "R — Direito", 1);
+    obs_property_set_modified_callback(mode, properties_modified);
+    obs_property_set_visible(channel, false);
+
+    obs_property_t *style =
+        obs_properties_add_list(props, "visual_style", "Estilo visual",
+                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(style, "Profissional (Painel)", STYLE_PRO);
+    obs_property_list_add_int(style, "LED Moderno", STYLE_LED);
+    obs_property_list_add_int(style, "Clássico Analógico", STYLE_ANALOG);
+    obs_property_list_add_int(style, "Minimalista", STYLE_MINIMAL);
+    obs_property_list_add_int(style, "Neon Glow", STYLE_NEON);
+    obs_property_list_add_int(style, "Branco (Claro)", STYLE_WHITE);
+    obs_property_list_add_int(style, "Dark Premium", STYLE_DARK);
+    obs_property_list_add_int(style, "Retro Vintage", STYLE_RETRO);
+
+    obs_property_t *bg =
+        obs_properties_add_list(props, "background_mode", "Fundo / Chroma Key",
+                                OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(bg, "Normal", BG_NORMAL);
+    obs_property_list_add_int(bg, "Transparente", BG_TRANSPARENT);
+    obs_property_list_add_int(bg, "Chroma Key Verde", BG_CHROMA_GREEN);
+    obs_property_list_add_int(bg, "Chroma Key Azul", BG_CHROMA_BLUE);
+    obs_property_list_add_int(bg, "Preto", BG_BLACK);
+
+    obs_properties_add_int(props, "segments", "Segmentos LED", 8, 96, 1);
     obs_properties_add_float_slider(props, "min_db", "Escala mínima (dB)", -80.0, -20.0, 1.0);
     obs_properties_add_float_slider(props, "warning_db", "Início do amarelo (dB)", -40.0, -1.0, 1.0);
     obs_properties_add_float_slider(props, "error_db", "Início do vermelho (dB)", -20.0, 0.0, 1.0);
-    obs_properties_add_int(props, "gap", "Espaçamento", 0, 12, 1);
-    obs_properties_add_int(props, "thickness", "Espessura", 2, 40, 1);
-
-    obs_property_t *direction = obs_properties_add_list(props, "direction", "Orientação",
-                                                          OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(direction, "Horizontal", 0);
-    obs_property_list_add_int(direction, "Vertical", 1);
-
-    obs_property_t *meter_mode = obs_properties_add_list(
-        props, "meter_mode", "Modo do medidor",
-        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(meter_mode, "Estéreo — L + R", 0);
-    obs_property_list_add_int(meter_mode, "Barra única", 1);
-
-    obs_property_t *mono_channel = obs_properties_add_list(
-        props, "mono_channel", "Canal da barra única",
-        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(mono_channel, "L — Esquerdo", 0);
-    obs_property_list_add_int(mono_channel, "R — Direito", 1);
+    obs_properties_add_int(props, "gap", "Espaçamento entre segmentos", 0, 12, 1);
+    obs_properties_add_int(props, "thickness", "Espessura visual", 2, 40, 1);
 
     obs_properties_add_bool(props, "show_peak", "Mostrar Peak");
     obs_properties_add_bool(props, "show_hold", "Mostrar Peak Hold");
     obs_properties_add_float_slider(props, "peak_hold", "Tempo do Peak Hold (s)", 0.1, 10.0, 0.1);
     obs_properties_add_float_slider(props, "peak_decay", "Queda do Peak (dB/s)", 1.0, 60.0, 1.0);
 
-    obs_properties_add_color(props, "color_green", "Cor verde");
-    obs_properties_add_color(props, "color_yellow", "Cor amarela");
-    obs_properties_add_color(props, "color_red", "Cor vermelha");
-    obs_properties_add_color(props, "color_off", "LED apagado");
-    obs_properties_add_color_alpha(props, "color_background", "Fundo");
-    obs_properties_add_color(props, "color_peak", "Peak atual");
-    obs_properties_add_color(props, "color_hold", "Peak Hold");
-
-    /*
-     * The L/R selector is relevant only in Single Bar mode.
-     * Attach the modification callback to the mode property itself and
-     * initialize the selector as hidden for the default Stereo mode.
-     */
-    obs_property_set_modified_callback(meter_mode, vu_meter_properties_modified);
-
-    obs_property_set_visible(mono_channel, false);
+    obs_properties_add_color(props, "color_green", "Cor nível verde");
+    obs_properties_add_color(props, "color_yellow", "Cor nível amarelo");
+    obs_properties_add_color(props, "color_red", "Cor nível vermelho");
+    obs_properties_add_color(props, "color_off", "Cor LED desligado");
+    obs_properties_add_color_alpha(props, "color_background", "Cor de fundo");
+    obs_properties_add_color(props, "color_peak", "Cor Peak");
+    obs_properties_add_color(props, "color_hold", "Cor Peak Hold");
+    obs_properties_add_color(props, "color_frame", "Cor moldura");
 
     return props;
 }
@@ -664,38 +785,74 @@ static obs_properties_t *vu_properties(void *data)
 static void vu_defaults(obs_data_t *settings)
 {
     obs_data_set_default_string(settings, "source_name", "");
+    obs_data_set_default_int(settings, "layout", LAYOUT_BASIC);
+    obs_data_set_default_int(settings, "meter_mode", METER_STEREO);
+    obs_data_set_default_int(settings, "mono_channel", 0);
+    obs_data_set_default_int(settings, "visual_style", STYLE_PRO);
+    obs_data_set_default_int(settings, "background_mode", BG_NORMAL);
+
     obs_data_set_default_int(settings, "segments", 32);
     obs_data_set_default_double(settings, "min_db", DEFAULT_MIN_DB);
     obs_data_set_default_double(settings, "warning_db", DEFAULT_WARN_DB);
     obs_data_set_default_double(settings, "error_db", DEFAULT_ERROR_DB);
     obs_data_set_default_int(settings, "gap", 3);
     obs_data_set_default_int(settings, "thickness", 10);
-    obs_data_set_default_int(settings, "direction", 0);
-    obs_data_set_default_int(settings, "meter_mode", 0);
-    obs_data_set_default_int(settings, "mono_channel", 0);
+
     obs_data_set_default_bool(settings, "show_peak", true);
     obs_data_set_default_bool(settings, "show_hold", true);
     obs_data_set_default_double(settings, "peak_hold", 1.5);
     obs_data_set_default_double(settings, "peak_decay", 18.0);
-    obs_data_set_default_int(settings, "color_green", 0xFF6FE035);
-    obs_data_set_default_int(settings, "color_yellow", 0xFF4DD8FF);
-    obs_data_set_default_int(settings, "color_red", 0xFF303BFF);
-    obs_data_set_default_int(settings, "color_off", 0xFF2B2520);
-    obs_data_set_default_int(settings, "color_background", 0xB0191410);
+
+    obs_data_set_default_int(settings, "color_green", 0xFF35E06F);
+    obs_data_set_default_int(settings, "color_yellow", 0xFFFFD84D);
+    obs_data_set_default_int(settings, "color_red", 0xFFFF3B30);
+    obs_data_set_default_int(settings, "color_off", 0xFF20252B);
+    obs_data_set_default_int(settings, "color_background", 0xB0101419);
     obs_data_set_default_int(settings, "color_peak", 0xFFFFFFFF);
-    obs_data_set_default_int(settings, "color_hold", 0xFFFFFF00);
+    obs_data_set_default_int(settings, "color_hold", 0xFF00FFFF);
+    obs_data_set_default_int(settings, "color_frame", 0xFF353B43);
 }
 
 static uint32_t vu_width(void *data)
 {
     auto *m = static_cast<vu_meter *>(data);
-    return m && m->direction == 1 ? 180 : 640;
+    switch (m ? m->layout : LAYOUT_BASIC) {
+    case LAYOUT_VERTICAL_PANEL:
+    case LAYOUT_VERTICAL_LED:
+        return 220;
+    case LAYOUT_ANALOG_VERTICAL:
+        return 300;
+    case LAYOUT_PRO_PANEL:
+    case LAYOUT_ANALOG:
+    case LAYOUT_DOUBLE_SCALE:
+        return 760;
+    default:
+        return 640;
+    }
 }
 
 static uint32_t vu_height(void *data)
 {
     auto *m = static_cast<vu_meter *>(data);
-    return m && m->direction == 1 ? 420 : 120;
+    switch (m ? m->layout : LAYOUT_BASIC) {
+    case LAYOUT_VERTICAL_PANEL:
+        return 480;
+    case LAYOUT_VERTICAL_LED:
+        return 420;
+    case LAYOUT_ANALOG_VERTICAL:
+        return 520;
+    case LAYOUT_PRO_PANEL:
+        return 260;
+    case LAYOUT_ANALOG:
+        return 220;
+    case LAYOUT_DOUBLE_SCALE:
+        return 180;
+    case LAYOUT_SINGLE:
+    case LAYOUT_SINGLE_SLIM:
+        return 120;
+    default:
+        return 120;
+    }
 }
 
 } // namespace
