@@ -1,64 +1,54 @@
-name: Build OBS VU Meter PRO - Windows
+name: Build OBS VU Meter PRO - Windows OBS 33
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
+      - obs33-compat-installer
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Windows x64
+    name: Windows x64 - OBS 33 layout
     runs-on: windows-2022
 
     steps:
-
       - name: Checkout VU Meter
         uses: actions/checkout@v4
 
       - name: Clone official OBS plugin template
         shell: pwsh
-        run: |
-          git clone --depth 1 https://github.com/obsproject/obs-plugintemplate.git template
+        run: git clone --depth 1 https://github.com/obsproject/obs-plugintemplate.git template
 
-      - name: Copy plugin source
+      - name: Copy plugin source and data
         shell: pwsh
         run: |
           Remove-Item template/src/* -Recurse -Force -ErrorAction SilentlyContinue
-
           Copy-Item src/* template/src/ -Recurse -Force
-
-      - name: Copy plugin data
-        shell: pwsh
-        run: |
           if (Test-Path "data") {
             Remove-Item template/data/* -Recurse -Force -ErrorAction SilentlyContinue
             Copy-Item data/* template/data/ -Recurse -Force
           }
+          Copy-Item CMakeLists.txt template/CMakeLists.txt -Force
+          Copy-Item buildspec.json template/buildspec.json -Force
 
       - name: Configure plugin metadata
         shell: pwsh
         run: |
           $file = "template/buildspec.json"
-
           $spec = Get-Content $file -Raw | ConvertFrom-Json
-
           $spec.name = "obs-vu-meter-pro"
           $spec.displayName = "VU Meter PRO"
-          $spec.version = "1.0.0"
+          $spec.version = "1.1.0"
           $spec.author = "Doctor DJ"
           $spec.website = "https://github.com/doctordj/obs-vu-meter-pro"
           $spec.email = ""
-
+          $spec.dependencies."obs-studio".version = "33.0.1"
+          $spec.dependencies."obs-studio".hashes."windows-x64" = "0f228b960c099c6f6bca9f09a0c3516f14fdf1dd96e1d4702145c5d3ba8cba31"
           $spec | ConvertTo-Json -Depth 20 | Set-Content $file
-
-      - name: Copy plugin CMakeLists
-        shell: pwsh
-        run: |
-          Copy-Item CMakeLists.txt template/CMakeLists.txt -Force
 
       - name: Build plugin
         shell: pwsh
@@ -68,23 +58,37 @@ jobs:
             -Target x64 `
             -Configuration Release
 
-      - name: Package plugin
+      - name: Stage OBS 33 plugin layout
         shell: pwsh
         run: |
           $release = "template/release/Release"
+          $dll = Get-ChildItem $release -Recurse -Filter "obs-vu-meter-pro.dll" | Select-Object -First 1
+          if (!$dll) { throw "obs-vu-meter-pro.dll was not found in build output." }
+          $dataSource = Join-Path $release "data/obs-plugins/obs-vu-meter-pro"
+          if (!(Test-Path $dataSource)) { throw "Plugin data folder was not generated: $dataSource" }
+          New-Item -ItemType Directory -Force -Path "staging/data" | Out-Null
+          Copy-Item $dll.FullName "staging/obs-vu-meter-pro.dll" -Force
+          Copy-Item "$dataSource/*" "staging/data/" -Recurse -Force
+          Compress-Archive -Path "staging/*" -DestinationPath "OBS-VU-Meter-PRO-OBS33-Windows-x64.zip" -Force
 
-          if (!(Test-Path $release)) {
-            throw "Release directory was not generated."
-          }
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
 
-          Compress-Archive `
-            -Path "$release/*" `
-            -DestinationPath "OBS-VU-Meter-PRO-Windows-x64.zip" `
-            -Force
+      - name: Build installer EXE
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
+          & $iscc "installer/OBS-VU-Meter-PRO.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed." }
+          Copy-Item "installer/output/OBS-VU-Meter-PRO-OBS33-Setup.exe" . -Force
 
-      - name: Upload plugin
+      - name: Upload installer and ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OBS-VU-Meter-PRO-Windows-x64
-          path: OBS-VU-Meter-PRO-Windows-x64.zip
+          name: OBS-VU-Meter-PRO-OBS33-Windows-x64
+          path: |
+            OBS-VU-Meter-PRO-OBS33-Setup.exe
+            OBS-VU-Meter-PRO-OBS33-Windows-x64.zip
           if-no-files-found: error

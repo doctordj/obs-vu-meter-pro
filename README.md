@@ -1,23 +1,25 @@
 # OBS VU Meter PRO
 
-Plugin nativo para OBS Studio, com VU Meter estéreo em barras LED coloridas.
+Plugin nativo para OBS Studio, com VU Meter estéreo em barras LED coloridas, layouts gráficos e opções de fundo/chroma key.
 
-## Compilação Windows x64
+## OBS Studio 33+ (Windows x64)
 
-O projeto foi preparado para ser compilado automaticamente pelo GitHub Actions em `windows-2022`, seguindo a arquitetura de build do template oficial de plugins do OBS.
+A distribuição OBS 33+ usa a estrutura de plugin atualizada:
 
-1. Crie um repositório chamado `obs-vu-meter-pro` na conta `doctordj`.
-2. Envie todos os arquivos deste projeto para a branch `main`.
-3. Abra a aba **Actions**.
-4. Selecione **Build OBS VU Meter PRO - Windows x64**.
-5. Clique em **Run workflow**.
-6. Ao terminar com **Success**, abra a execução e baixe o artefato `OBS-VU-Meter-PRO-Windows-x64`.
-
-O ZIP gerado contém:
-
-```text
-obs-plugins/64bit/obs-vu-meter-pro.dll
-data/obs-plugins/obs-vu-meter-pro/locale/en-US.ini
+```
+C:\ProgramData\obs-studio\plugins\obs-vu-meter-pro\
+  obs-vu-meter-pro.dll
+  data\locale\en-US.ini
+  data\backgrounds\...
 ```
 
-Compatibilidade alvo: Windows 11 x64 + OBS Studio 32.x.
+O instalador `OBS-VU-Meter-PRO-OBS33-Setup.exe` instala o plugin nessa estrutura e remove cópias anteriores gerenciadas nas localizações legacy conhecidas. Feche o OBS Studio antes de instalar e reabra-o após a instalação.
+
+## Compilação
+
+O GitHub Actions workflow **Build OBS VU Meter PRO - Windows OBS 33** constrói o plugin com o template oficial de plugins do OBS, monta o layout OBS 33+ e publica dois artefatos na execução:
+
+- `OBS-VU-Meter-PRO-OBS33-Setup.exe` — instalador Windows x64
+- `OBS-VU-Meter-PRO-OBS33-Windows-x64.zip` — instalação manual
+
+O ZIP contém o DLL na raiz da pasta do plugin e os arquivos de dados dentro de `data/`.
