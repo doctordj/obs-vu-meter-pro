@@ -47,7 +47,7 @@ jobs:
           $spec.website = "https://github.com/doctordj/obs-vu-meter-pro"
           $spec.email = ""
           $spec.dependencies."obs-studio".version = "33.0.1"
-          $spec.dependencies."obs-studio".hashes = @{}
+          $spec.dependencies."obs-studio".hashes."windows-x64" = "0f228b960c099c6f6bca9f09a0c3516f14fdf1dd96e1d4702145c5d3ba8cba31"
           $spec | ConvertTo-Json -Depth 20 | Set-Content $file
 
       - name: Build plugin
