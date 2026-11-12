@@ -57,6 +57,8 @@ struct vu_meter {
     obs_source_t *source = nullptr;
     obs_volmeter_t *volmeter = nullptr;
     obs_source_t *attached_source = nullptr;
+    // Persist the selected source name so startup can retry lookup after OBS finishes loading sources.
+    std::string selected_source_name;
 
     std::mutex level_mutex;
     float magnitude[2] = {DEFAULT_MIN_DB, DEFAULT_MIN_DB};
@@ -993,6 +995,16 @@ static void vu_tick(void *data, float seconds)
     if (!m)
         return;
 
+    // OBS may call update() before the referenced audio source is registered during profile startup.
+    // Retry resolving the saved name on subsequent video ticks until it becomes available.
+    if (!m->attached_source && !m->selected_source_name.empty()) {
+        obs_source_t *src = obs_get_source_by_name(m->selected_source_name.c_str());
+        if (src) {
+            set_source(m, src);
+            obs_source_release(src);
+        }
+    }
+
     const float dt = std::clamp(seconds, 0.0f, 0.25f);
     std::lock_guard<std::mutex> lock(m->level_mutex);
 
@@ -1051,7 +1063,9 @@ static void vu_update(void *data, obs_data_t *settings)
         return;
 
     const char *name = obs_data_get_string(settings, "source_name");
-    obs_source_t *src = (name && *name) ? obs_get_source_by_name(name) : nullptr;
+    m->selected_source_name = (name && *name) ? name : "";
+    obs_source_t *src = !m->selected_source_name.empty()
+        ? obs_get_source_by_name(m->selected_source_name.c_str()) : nullptr;
     set_source(m, src);
     if (src)
         obs_source_release(src);
