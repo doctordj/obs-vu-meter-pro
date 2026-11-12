@@ -33,6 +33,7 @@ jobs:
             Copy-Item data/* template/data/ -Recurse -Force
           }
           Copy-Item CMakeLists.txt template/CMakeLists.txt -Force
+          Copy-Item buildspec.json template/buildspec.json -Force
 
       - name: Configure plugin metadata
         shell: pwsh
@@ -45,6 +46,8 @@ jobs:
           $spec.author = "Doctor DJ"
           $spec.website = "https://github.com/doctordj/obs-vu-meter-pro"
           $spec.email = ""
+          $spec.dependencies."obs-studio".version = "33.0.1"
+          $spec.dependencies."obs-studio".hashes = @{}
           $spec | ConvertTo-Json -Depth 20 | Set-Content $file
 
       - name: Build plugin
