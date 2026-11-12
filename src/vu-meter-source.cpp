@@ -1037,7 +1037,7 @@ static void vu_destroy(void *data)
     }
 
     if (m->background_initialized) {
-        gs_image_file_free(&m->background_image);
+        gs_image_file_ex_free(&m->background_image);
         m->background_initialized = false;
     }
 
