@@ -1097,6 +1097,13 @@ static void vu_update(void *data, obs_data_t *settings)
     m->color_frame = migrate_color(obs_data_get_int(settings, "color_frame"), 0xFF353B43);
 }
 
+static void vu_load(void *data, obs_data_t *settings)
+{
+    // OBS calls the load callback after all scene sources have been created.
+    // Reapply settings here so the selected audio source can be resolved reliably.
+    vu_update(data, settings);
+}
+
 static bool enum_source(void *param, obs_source_t *source)
 {
     auto *list = static_cast<obs_property_t *>(param);
@@ -1298,6 +1305,7 @@ struct obs_source_info vu_meter_source_info = {
     .get_defaults = vu_defaults,
     .get_properties = vu_properties,
     .update = vu_update,
+    .load = vu_load,
 
     .video_tick = vu_tick,
     .video_render = vu_render,
