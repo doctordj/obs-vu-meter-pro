@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - obs33-compat-installer
+      - fix-audio-device-startup
 
 permissions:
   contents: read
