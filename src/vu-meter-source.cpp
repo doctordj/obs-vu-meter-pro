@@ -1305,10 +1305,10 @@ struct obs_source_info vu_meter_source_info = {
     .get_defaults = vu_defaults,
     .get_properties = vu_properties,
     .update = vu_update,
-    .load = vu_load,
 
     .video_tick = vu_tick,
     .video_render = vu_render,
+    .load = vu_load,
 
     .icon_type = OBS_ICON_TYPE_CUSTOM,
 };
