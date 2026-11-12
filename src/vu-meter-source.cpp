@@ -95,7 +95,7 @@ struct vu_meter {
     // High-quality photographic/procedural panel backgrounds.
     std::string background_file;
     std::string background_loaded_file;
-    gs_image_file_t background_image{};
+    gs_image_file_ex_t background_image{};
     bool background_initialized = false;
 };
 
@@ -611,13 +611,13 @@ static void ensure_background_texture(vu_meter *m)
         return;
 
     if (m->background_initialized) {
-        gs_image_file_free(&m->background_image);
+        gs_image_file_ex_free(&m->background_image);
         m->background_initialized = false;
         m->background_loaded_file.clear();
     }
 
-    gs_image_file_init(&m->background_image, m->background_file.c_str());
-    gs_image_file_init_texture(&m->background_image);
+    gs_image_file_ex_init(&m->background_image, m->background_file.c_str(), GS_IMAGE_ALPHA_PREMULTIPLY);
+    gs_image_file_ex_init_texture(&m->background_image);
     m->background_initialized = m->background_image.texture != nullptr;
     if (m->background_initialized)
         m->background_loaded_file = m->background_file;
